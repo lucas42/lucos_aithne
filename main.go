@@ -11,7 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
+
+	"lucos_aithne/store"
 )
 
 const healthcheckTimeout = 5 * time.Second
@@ -38,11 +41,19 @@ func getEnvRequired(key string) string {
 	return val
 }
 
-func handleInfo(system string) http.HandlerFunc {
+func handleInfo(system string, s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		checks := map[string]any{}
+		if err := s.Ping(); err != nil {
+			checks["db"] = "error"
+			log.Printf("/_info db ping failed: %v", err)
+		} else {
+			checks["db"] = "ok"
+		}
+
 		info := infoResponse{
 			System:  system,
-			Checks:  map[string]any{},
+			Checks:  checks,
 			Metrics: map[string]any{},
 			CI:      &ciInfo{Circle: "gh/lucas42/lucos_aithne"},
 			Title:   "Aithne",
@@ -74,6 +85,23 @@ func runHealthcheck(port string) {
 	os.Exit(0)
 }
 
+// ensureDir creates the parent directory of path if it does not already exist.
+// This is a no-op for in-memory paths (e.g. ":memory:").
+func ensureDir(path string) error {
+	if path == ":memory:" || path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	return os.MkdirAll(dir, 0o700)
+}
+
+func getEnvWithDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
 func main() {
 	port := getEnvRequired("PORT")
 
@@ -83,8 +111,19 @@ func main() {
 
 	system := getEnvRequired("SYSTEM")
 
+	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
+	if err := ensureDir(dbPath); err != nil {
+		log.Fatalf("Cannot create data directory for %q: %v", dbPath, err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to open principal/credential store at %q: %v", dbPath, err)
+	}
+	defer s.Close()
+	log.Printf("Principal/credential store ready at %s", dbPath)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/_info", handleInfo(system))
+	mux.HandleFunc("/_info", handleInfo(system, s))
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting lucos_aithne — system=%s, listening on %s", system, addr)
