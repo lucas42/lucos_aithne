@@ -1,0 +1,9 @@
+# Compiled binaries
+lucos_aithne
+
+# Go test cache
+*.test
+coverage.out
+
+# Environment files
+.env

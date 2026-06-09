@@ -1,0 +1,19 @@
+services:
+  lucos_aithne:
+    build: .
+    container_name: lucos_aithne
+    image: lucas42/lucos_aithne:${VERSION:-latest}
+    restart: always
+    ports:
+      - $PORT:$PORT
+    environment:
+      - PORT
+      - SYSTEM
+      - ENVIRONMENT
+      - APP_ORIGIN
+    healthcheck:
+      test: ["CMD", "/lucos_aithne", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
