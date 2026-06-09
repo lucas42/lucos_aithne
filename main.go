@@ -43,12 +43,13 @@ func getEnvRequired(key string) string {
 
 func handleInfo(system string, s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		const dbDetail = "Checks whether a connection to the SQLite credential store can be established"
 		checks := map[string]any{}
 		if err := s.Ping(); err != nil {
-			checks["db"] = "error"
+			checks["db"] = map[string]any{"ok": false, "techDetail": dbDetail, "debug": err.Error()}
 			log.Printf("/_info db ping failed: %v", err)
 		} else {
-			checks["db"] = "ok"
+			checks["db"] = map[string]any{"ok": true, "techDetail": dbDetail}
 		}
 
 		info := infoResponse{
