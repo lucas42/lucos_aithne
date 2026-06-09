@@ -35,12 +35,25 @@ func TestInfoEndpoint(t *testing.T) {
 	}
 	checks, ok := payload["checks"]
 	if !ok {
-		t.Error("checks field missing from /_info response")
+		t.Fatal("checks field missing from /_info response")
 	}
-	if checksMap, ok := checks.(map[string]any); ok {
-		if checksMap["db"] != "ok" {
-			t.Errorf("checks.db: got %v, want %q", checksMap["db"], "ok")
-		}
+	checksMap, ok := checks.(map[string]any)
+	if !ok {
+		t.Fatalf("checks: expected map, got %T", checks)
+	}
+	dbRaw, ok := checksMap["db"]
+	if !ok {
+		t.Fatal("checks.db missing from /_info response")
+	}
+	dbCheck, ok := dbRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("checks.db: expected object (monitoring schema), got %T (%v)", dbRaw, dbRaw)
+	}
+	if dbCheck["ok"] != true {
+		t.Errorf("checks.db.ok: got %v, want true", dbCheck["ok"])
+	}
+	if _, ok := dbCheck["techDetail"]; !ok {
+		t.Error("checks.db.techDetail missing")
 	}
 	if _, ok := payload["metrics"]; !ok {
 		t.Error("metrics field missing from /_info response")
