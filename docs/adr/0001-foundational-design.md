@@ -1,7 +1,8 @@
 # ADR-0001: lucos_aithne foundational design — passkey authentication and scoped authorisation
 
 **Date:** 2026-06-09
-**Status:** Proposed
+**Status:** Accepted
+**Accepted:** 2026-06-09 — approved by lucas42 (PR #2)
 **Discussion:** https://github.com/lucas42/lucos_aithne/issues/1
 
 ## Context
