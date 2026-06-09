@@ -9,9 +9,10 @@ RUN go mod download
 COPY *.go .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o lucos_aithne .
 
-# Runtime stage: distroless static — no shell, no package manager, minimal attack surface.
-# Appropriate for an auth service where reducing the runtime footprint matters.
-FROM gcr.io/distroless/static-debian12
+# Runtime stage: scratch — the binary is fully static (CGO_ENABLED=0) so there are
+# no runtime dependencies. CA certificates and timezone data will be added explicitly
+# when the service makes its first outbound HTTPS calls.
+FROM scratch
 ARG VERSION
 ENV VERSION=$VERSION
 

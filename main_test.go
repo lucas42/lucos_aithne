@@ -4,14 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 )
 
 func TestInfoEndpoint(t *testing.T) {
-	os.Setenv("SYSTEM", "lucos_aithne")
-	os.Setenv("PORT", "8039")
-
 	req := httptest.NewRequest(http.MethodGet, "/_info", nil)
 	rr := httptest.NewRecorder()
 

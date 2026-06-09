@@ -18,7 +18,6 @@ workflows:
     jobs:
       - test
       - lucos/build:
-          platform: "linux/amd64,linux/arm64"
           serial-group: << pipeline.project.slug >>/build/<< pipeline.git.branch >>
       - lucos/deploy-avalon:
           serial-group: deploy-avalon
