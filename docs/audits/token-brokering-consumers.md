@@ -44,15 +44,63 @@ services that need to make Google API calls on behalf of the logged-in user.
 ## Audit Methodology
 
 Searched all repositories in the `lucas42` estate (approximately 80 repos cloned
-locally) for:
+locally) under `~/sandboxes/`. The commands below are the actual searches run.
 
-1. Any URL construction or reference to `/apptoken`
-2. Any call to `/data` with an `apikey` query parameter
-3. Any Docker volume mount of `authconfig` (the directory containing `appkeys.conf`)
-4. Any environment variables carrying an auth app key (`AUTH_APIKEY`, `AUTH_APP_KEY`,
-   etc.)
-5. Third-party API usage patterns (googleapis, YouTube, etc.) that might imply a
-   dependency on brokered tokens
+**1. Direct `/apptoken` references** — any URL construction or string containing the endpoint:
+
+```bash
+grep -rn "apptoken" ~/sandboxes/ 2>/dev/null \
+  | grep -v "node_modules|\.git|Binary"
+```
+
+**2. `apikey` query parameter usage** — services calling `/data` with a trusted key, plus
+any other `apikey`/`appkey` references:
+
+```bash
+grep -rn "apikey\|app_key\|appkey\|appkeys" ~/sandboxes/ \
+  --include="*.js" --include="*.ts" --include="*.py" --include="*.rb" \
+  --include="*.go" --include="*.php" --include="*.yml" --include="*.yaml" \
+  --include="*.conf" 2>/dev/null \
+  | grep -v "node_modules|\.git|lucos_authentication|lucos_aithne"
+```
+
+**3. `authconfig` volume mounts** — Docker services mounting the directory containing
+`appkeys.conf`:
+
+```bash
+grep -rn "authconfig\|appkeys.conf\|/etc/auth" ~/sandboxes/ \
+  --include="docker-compose.yml" --include="Dockerfile" --include="*.sh" \
+  2>/dev/null | grep -v "lucos_authentication"
+```
+
+**4. Auth app-key environment variables** — env vars that might carry a trusted key:
+
+```bash
+grep -rn "AUTH_APIKEY\|AUTH_APP_KEY\|APPKEY\|APP_TOKEN\|KEY_LUCOS_AUTH" \
+  ~/sandboxes/ --include="docker-compose.yml" --include="docker-compose.yaml" \
+  2>/dev/null | grep -v "lucos_authentication|lucos_aithne"
+```
+
+**5. Third-party API usage** — services importing Google / YouTube / other external API
+libraries that might imply a dependency on brokered tokens:
+
+```bash
+grep -rn "googleapis\|google\.com/oauth\|youtube\|gmail\|GOOGLE_TOKEN" \
+  ~/sandboxes/ --include="*.js" --include="*.ts" --include="*.py" \
+  --include="*.go" --include="*.php" 2>/dev/null \
+  | grep -v "node_modules|\.git|lucos_authentication|lucos_aithne|test|\.md"
+```
+
+**6. Standard auth consumers** — to distinguish trusted from untrusted `/data` callers,
+also enumerated all services calling `auth.l42.eu` or `AUTH_ORIGIN`:
+
+```bash
+grep -rn "auth\.l42\.eu\|AUTH_ORIGIN" ~/sandboxes/ \
+  --include="*.js" --include="*.ts" --include="*.py" --include="*.rb" \
+  --include="*.go" --include="*.php" --include="*.yml" --include="*.yaml" \
+  2>/dev/null \
+  | grep -v "node_modules|\.git|lucos_authentication|lucos_aithne|lucos_mockauthentication"
+```
 
 ## Findings
 
