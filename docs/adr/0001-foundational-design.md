@@ -34,7 +34,7 @@ The login ceremony lives only in aithne. Passkeys are phishing-resistant, first-
 Both the human and machine paths yield the *same artefact*: a short-lived **signed JWT**. It carries:
 
 - **principal class** — `human` / `service` / `agent`;
-- **identity** — a `lucos_contacts` ID for humans (see §4); an aithne-native principal id for agents;
+- **identity** — a `lucos_contacts` ID for humans, or the agent-registry slug for agents (see §4), typed by principal class;
 - **granted scopes** (§6).
 
 It is set as a cookie on `.l42.eu` for same-site SSO. Services verify it **locally via JWKS** — no per-request callback to aithne. This replaces the `/data?token=` introspection pattern and removes the amplification/brute-force surface (see §"Rate-limiting").
@@ -44,7 +44,7 @@ It is set as a cookie on `.l42.eu` for same-site SSO. Services verify it **local
 aithne owns the credential store (WebAuthn public keys, machine keys) and a principal registry.
 
 - **Humans MUST have a `lucos_contacts` entry**, and the human principal carries that contact-id. Invariant: no human is granted access without being a contact ("if they're not a contact of mine, why would I be giving them access to my stuff?").
-- **AI agents have an aithne-native principal identity and NO `lucos_contacts` entry.** Agents are not contacts.
+- **AI agents are not `lucos_contacts`.** An agent principal's identity is the **canonical agent-registry identifier — today the `lucos_agent` `personas.json` slug** (e.g. `lucos-architect`) — *referenced*, not freshly minted. This mirrors the human model: identity authority is always external to aithne (`lucos_contacts` for humans, the agent registry for agents), and aithne owns only the credential. aithne captures the slug when an agent's credential is provisioned and does **not** take a runtime/build dependency on `personas.json`, so that file's format can evolve freely. The id is carried in the session under the `agent` principal class, kept distinct from human contact-ids by class + type.
 - Non-AI service principals (e.g. `lucos_root`) use an aithne-native principal identity; a contact link is optional and deliberately left open rather than foreclosed.
 
 ### 5. Machine and agent authentication — OAuth2 client-credentials
@@ -97,6 +97,7 @@ The estate-wide default-deny firewall is now enforcing (lucas42/lucos#182), so b
 - Stateless JWTs make **revocation eventually-consistent** — a revoked grant persists until the current short-lived token expires. Short TTL + cheap re-mint mitigates; instant revocation, if ever needed, is a later narrow addition (a targeted callback) rather than the default.
 - **Two M2M scope-bearing mechanisms coexist** — creds' direct-key validation and aithne sessions. Convergence is deliberately parked (it would bloat the migration). The design keeps the door open: shared scope vocabulary, the long-lived key already creds-held, and one common token format — so a future where aithne signs creds-held grants reuses the same verification path.
 - aithne is on the login/mint hot path and must be reliable; its availability budget matters even though per-request verification does not depend on it.
+- Agent principal identity references the `lucos_agent` `personas.json` slug as a **stable external identifier**. `personas.json` is acknowledged ad-hoc and is slated for replacement by something more structured; the constraint this places on that future work is that **agent slugs must remain stable** (or aithne's agent principal records need migrating in step). Recorded here so the replacement honours it.
 
 ### Follow-up actions
 
