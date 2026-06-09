@@ -19,6 +19,17 @@ The machine-principal and authorisation model below was worked through on the ti
 
 ## Decision
 
+### 0. Implementation stack — Go
+
+aithne is written in **Go**. Rationale, in priority order for an auth service:
+
+- **Minimal attack surface.** A single static binary in a distroless/minimal image is the right profile for the estate's most security-sensitive service — no interpreter or broad package runtime to harden, no large dependency tree to keep audited.
+- **Mature, production-proven building blocks for its core jobs**, so "full OIDC from day one" does not mean hand-rolling protocol-critical code: an OIDC-Provider foundation (e.g. Ory Fosite — which powers the OpenID-certified Ory Hydra — or Zitadel's `oidc`), WebAuthn (e.g. `go-webauthn`), and JWT/JWKS (e.g. `golang-jwt` + `lestrrat-go/jwx`).
+- **Alignment with the adjacent security service.** `lucos_creds` — which aithne integrates with for machine-principal keys — is Go; shared idioms reduce risk on that integration boundary.
+- **Team muscle memory.** The recent estate (`lucos_firewall`, `lucos_repos`, `lucos_creds`, `lucos_docker_health`) is Go.
+
+**Alternative considered — Node.js** (`node-oidc-provider` is the most complete, OpenID-certified OP library, with `SimpleWebAuthn` and `jose`). Rejected as the default on attack-surface / supply-chain grounds for a security service and on estate alignment — but it is the fallback if assembling a correct OP on the Go foundations proves materially harder than expected. (Decided by the architect, inviting override; the choice gates the scaffold ticket lucas42/lucos_aithne#3.)
+
 ### 1. Self-hosted OpenID Provider — full OIDC from day one
 
 `lucos_aithne` is its own OpenID Provider (OIDC/OAuth2): standard discovery, authorization, token, userinfo and JWKS endpoints. Identity is proved by a passkey we verify ourselves — satisfying *"standard protocol usable by off-the-shelf tools"* and *"no third-party reliance"* simultaneously.
