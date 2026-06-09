@@ -11,9 +11,15 @@ services:
       - SYSTEM
       - ENVIRONMENT
       - APP_ORIGIN
+      - DB_PATH=/data/aithne.db
+    volumes:
+      - aithne_data:/data
     healthcheck:
       test: ["CMD", "/lucos_aithne", "--healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  aithne_data:
