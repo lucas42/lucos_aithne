@@ -329,10 +329,19 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 
 			// Embed the session ID into the response alongside the standard
 			// publicKey field so the JS can echo it back on finish.
-			assertionJSON, _ := json.Marshal(assertion)
+			assertionJSON, err := json.Marshal(assertion)
+			if err != nil {
+				log.Printf("login/begin: marshal discoverable assertion: %v", err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
 			var respMap map[string]json.RawMessage
-			json.Unmarshal(assertionJSON, &respMap)
-			sessionIDJSON, _ := json.Marshal(sessionID)
+			if err := json.Unmarshal(assertionJSON, &respMap); err != nil {
+				log.Printf("login/begin: unmarshal discoverable assertion: %v", err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			sessionIDJSON, _ := json.Marshal(sessionID) // uuid.New().String() is always valid JSON
 			respMap["aithne_session"] = sessionIDJSON
 			if err := json.NewEncoder(w).Encode(respMap); err != nil {
 				log.Printf("login/begin: encode discoverable options: %v", err)
