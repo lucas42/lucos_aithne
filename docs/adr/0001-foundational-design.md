@@ -83,6 +83,8 @@ The scope vocabulary is **issuer-agnostic** (both aithne and `lucos_creds` issue
 
 `lucos_creds` linked-credential scopes (currently character-class-validated freetext) are aligned to this vocabulary. Putting the registry in its own repo also lets it carry its own PR-approval policy (lucas42's approval required on every vocabulary change).
 
+> **Amendment (2026-06-10, [#52](https://github.com/lucas42/lucos_aithne/issues/52)):** The build-time pull lands the canonical file in the **runtime image**, read by `lucos_aithne` at startup (`SCOPES_PATH`, default `/scopes.yaml`) — *not* embedded in the binary, and **no stub is committed to this repo**. Originally aithne `//go:embed`-ed a committed stub copy; lucas42 directed its removal so there is **one canonical source and no in-repo copy to diverge**. The "build-time, no runtime polling" decision above is unchanged: the file is fixed in the immutable image layer at build and read locally with no network — "build-time" here means *version-bound at build*, even though the read happens at startup. Failure mode: a missing or malformed `/scopes.yaml` is a fatal startup error (fail-closed), surfaced immediately by the container healthcheck. A drift-enforcing CI check (the first instinct, recorded in #52) is unnecessary once there is no committed copy to keep in sync. Tests construct their vocabulary in-code, so dropping the embed does not couple local `go build`/`go test` to the registry — they remain fully offline.
+
 ### 8. Migration and the third-party-token split
 
 - **Third-party token brokering is split out of authentication entirely.** aithne is identity-only; the `/apptoken` role leaves the auth service. The impact (what consumes it today) is audited separately and handled case-by-case.
