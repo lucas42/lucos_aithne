@@ -224,6 +224,7 @@ func JWKSHandler(getKeys func() ([]*store.SigningKey, error)) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.Write(b)
 	}
 }

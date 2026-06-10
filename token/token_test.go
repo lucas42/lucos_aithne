@@ -320,6 +320,26 @@ func TestJWKSHandler_PublicKeyOnly(t *testing.T) {
 	}
 }
 
+func TestJWKSHandler_CacheControlHeader(t *testing.T) {
+	_, s := newTestSigningKey(t)
+
+	handler := token.JWKSHandler(func() ([]*store.SigningKey, error) {
+		return s.ListVerificationKeys(token.VerificationWindow)
+	})
+
+	req := httptest.NewRequest("GET", "/.well-known/jwks.json", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("expected HTTP 200, got %d", rr.Code)
+	}
+	cc := rr.Header().Get("Cache-Control")
+	if cc != "public, max-age=300" {
+		t.Errorf("Cache-Control: got %q, want %q", cc, "public, max-age=300")
+	}
+}
+
 // --- SetSessionCookie ---
 
 func TestSetSessionCookie(t *testing.T) {
