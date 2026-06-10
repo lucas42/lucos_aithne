@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -216,7 +217,7 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 		// Find or create the agent principal.
 		principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, req.AgentSlug)
 		if err != nil {
-			if err != store.ErrNotFound {
+			if !errors.Is(err, store.ErrNotFound) {
 				log.Printf("handleAdminMachineKeys: get principal %q: %v", req.AgentSlug, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
