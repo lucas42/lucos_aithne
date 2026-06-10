@@ -12,6 +12,7 @@ services:
       - ENVIRONMENT
       - APP_ORIGIN
       - DB_PATH=/data/aithne.db
+      - REGISTRATION_ENABLED
     volumes:
       - credential_store:/data
     healthcheck:
