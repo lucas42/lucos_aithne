@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,12 @@ import (
 	"lucos_aithne/store"
 	"lucos_aithne/token"
 )
+
+// contextKey is a private type for context keys in this package, preventing
+// collisions with other packages that also store values in request contexts.
+type contextKey int
+
+const claimsContextKey contextKey = iota
 
 // scopes.yaml is embedded at build time.
 // In Docker CI builds the Dockerfile replaces this with the canonical
@@ -259,7 +266,11 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 			return
 		}
 
-		next(w, r)
+		// Inject the verified claims into the request context so downstream
+		// handlers can read the authenticated subject for audit attribution
+		// without trusting any client-supplied field.
+		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -309,7 +320,6 @@ type createGrantRequest struct {
 	PrincipalID string `json:"principal_id"`
 	Scope       string `json:"scope"`
 	Environment string `json:"environment"`
-	GrantedBy   string `json:"granted_by"` // externalID of grantor; if empty, defaults to "api"
 }
 
 // createGrant handles POST /admin/grants.
@@ -324,10 +334,11 @@ func createGrant(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 			http.Error(w, "400 Bad Request — principal_id, scope, and environment are required", http.StatusBadRequest)
 			return
 		}
-		grantedBy := req.GrantedBy
-		if grantedBy == "" {
-			grantedBy = "api"
-		}
+
+		// Attribution is read from the verified JWT claims injected by
+		// requireAdminScope — never from a client-supplied field.
+		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		grantedBy := claims.Subject
 
 		g, err := s.CreateGrant(req.PrincipalID, req.Scope, req.Environment, grantedBy, vocab)
 		if errors.Is(err, store.ErrUnknownScope) {
@@ -369,12 +380,10 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 			return
 		}
 
-		// revokedBy comes from the Authorization header's sub claim (contact-id).
-		// For simplicity in this early version, accept an optional X-Revoked-By header.
-		revokedBy := r.Header.Get("X-Revoked-By")
-		if revokedBy == "" {
-			revokedBy = "api"
-		}
+		// Attribution is read from the verified JWT claims injected by
+		// requireAdminScope — never from a client-supplied header.
+		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		revokedBy := claims.Subject
 
 		err := s.RevokeGrant(id, revokedBy)
 		if errors.Is(err, store.ErrNotFound) {

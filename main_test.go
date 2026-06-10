@@ -246,7 +246,6 @@ func TestAdminGrants_CreateAndList(t *testing.T) {
 		"principal_id": target.ID,
 		"scope":        "render-ui",
 		"environment":  "development",
-		"granted_by":   "test-admin",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/admin/grants", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -266,6 +265,10 @@ func TestAdminGrants_CreateAndList(t *testing.T) {
 	}
 	if created["scope"] != "render-ui" {
 		t.Errorf("scope: got %v, want render-ui", created["scope"])
+	}
+	// granted_by must come from the JWT subject, not a client-supplied field.
+	if grantedBy, ok := created["granted_by"].(string); !ok || grantedBy == "" {
+		t.Errorf("granted_by: expected non-empty string from JWT subject, got %v", created["granted_by"])
 	}
 
 	// Verify the grant appears in LIST.
@@ -366,7 +369,6 @@ func TestAdminGrantByID_Revoke(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/admin/grants/"+g.ID, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("X-Revoked-By", "test-revoker")
 	rr := httptest.NewRecorder()
 	newAdminMux(s).ServeHTTP(rr, req)
 
@@ -374,13 +376,17 @@ func TestAdminGrantByID_Revoke(t *testing.T) {
 		t.Errorf("expected 204, got %d\n%s", rr.Code, rr.Body.String())
 	}
 
-	// Verify the grant is now revoked.
+	// Verify the grant is now revoked, and that revoked_by came from the JWT
+	// subject (not a client-supplied header).
 	fetched, err := s.GetGrant(g.ID)
 	if err != nil {
 		t.Fatalf("GetGrant after revoke: %v", err)
 	}
 	if fetched.IsActive() {
 		t.Error("grant should be revoked after DELETE")
+	}
+	if fetched.RevokedBy == nil || *fetched.RevokedBy == "" {
+		t.Error("revoked_by should be set from JWT subject")
 	}
 }
 
