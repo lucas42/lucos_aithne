@@ -540,11 +540,20 @@ func main() {
 	}
 	log.Printf("Scope vocabulary loaded: %v", vocab.All())
 
+	// Read the signing key KEK from the environment. Must be exactly 32 bytes
+	// for AES-256-GCM. Stored in lucos_creds as SIGNING_KEK.
+	signingKEKStr := getEnvRequired("SIGNING_KEK")
+	if len(signingKEKStr) != 32 {
+		log.Fatalf("SIGNING_KEK must be exactly 32 bytes, got %d", len(signingKEKStr))
+	}
+	var signingKEK [32]byte
+	copy(signingKEK[:], signingKEKStr)
+
 	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
 	if err := ensureDir(dbPath); err != nil {
 		log.Fatalf("Cannot create data directory for %q: %v", dbPath, err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, signingKEK)
 	if err != nil {
 		log.Fatalf("Failed to open principal/credential store at %q: %v", dbPath, err)
 	}

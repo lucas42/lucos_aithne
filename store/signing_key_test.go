@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/x509"
 	"testing"
 	"time"
@@ -180,5 +181,62 @@ func TestListVerificationKeys_ExcludesExpiredRetired(t *testing.T) {
 		if k.Status == "retired" {
 			t.Errorf("future cutoff: unexpected retired key %q", k.ID)
 		}
+	}
+}
+
+// TestEncryptDecryptKeyDER verifies the AES-256-GCM round-trip and wrong-KEK rejection.
+func TestEncryptDecryptKeyDER(t *testing.T) {
+	kek := testKEK
+	original := []byte("fake private key DER for unit testing encryptKeyDER/decryptKeyDER")
+
+	encrypted, err := encryptKeyDER(kek, original)
+	if err != nil {
+		t.Fatalf("encryptKeyDER: %v", err)
+	}
+	if bytes.Equal(encrypted, original) {
+		t.Error("encrypted bytes are identical to plaintext — no encryption occurred")
+	}
+
+	decrypted, err := decryptKeyDER(kek, encrypted)
+	if err != nil {
+		t.Fatalf("decryptKeyDER: %v", err)
+	}
+	if !bytes.Equal(decrypted, original) {
+		t.Errorf("round-trip mismatch: got %q, want %q", decrypted, original)
+	}
+
+	// A different KEK must cause decryption to fail (GCM authentication error).
+	var wrongKEK [32]byte
+	wrongKEK[0] = 0xFF
+	if _, err := decryptKeyDER(wrongKEK, encrypted); err == nil {
+		t.Error("expected error decrypting with wrong KEK, got nil")
+	}
+}
+
+// TestSigningKeyEncryptedAtRest verifies that the private_key BLOB stored in SQLite
+// is AES-GCM ciphertext and not raw PKCS8 DER.
+func TestSigningKeyEncryptedAtRest(t *testing.T) {
+	s := newTestStore(t)
+	k, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	// Read the raw blob directly from SQLite, bypassing the store's decrypt path.
+	var rawBlob []byte
+	if err := s.db.QueryRow(
+		`SELECT private_key FROM signing_keys WHERE id = ?`, k.ID,
+	).Scan(&rawBlob); err != nil {
+		t.Fatalf("read raw blob from DB: %v", err)
+	}
+
+	// The raw blob must differ from the plaintext DER.
+	if bytes.Equal(rawBlob, k.PrivateKey) {
+		t.Error("private_key blob in DB matches plaintext DER — key is NOT encrypted at rest")
+	}
+
+	// The raw blob must NOT be parseable as PKCS8 (that would mean it's stored unencrypted).
+	if _, parseErr := x509.ParsePKCS8PrivateKey(rawBlob); parseErr == nil {
+		t.Error("raw private_key blob in DB is valid PKCS8 — key is stored unencrypted")
 	}
 }

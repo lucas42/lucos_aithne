@@ -89,12 +89,14 @@ var (
 
 // Store manages aithne's principal registry and credential store via SQLite.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	kek [32]byte // Key-Encryption Key for AES-256-GCM envelope encryption of signing key material.
 }
 
 // Open opens (or creates) the SQLite database at path and applies schema migrations.
+// kek is the 32-byte Key-Encryption Key used to AES-256-GCM encrypt signing key material at rest.
 // Pass ":memory:" for an ephemeral in-memory database (tests only).
-func Open(path string) (*Store, error) {
+func Open(path string, kek [32]byte) (*Store, error) {
 	dsn := buildDSN(path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -104,7 +106,7 @@ func Open(path string) (*Store, error) {
 	// reliable, and is appropriate for an embedded SQLite database.
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db}
+	s := &Store{db: db, kek: kek}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)

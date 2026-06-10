@@ -11,10 +11,18 @@ import (
 	"lucos_aithne/token"
 )
 
+// tokenTestKEK is a deterministic 32-byte KEK for token package tests.
+var tokenTestKEK = [32]byte{
+	99, 98, 97, 96, 95, 94, 93, 92,
+	91, 90, 89, 88, 87, 86, 85, 84,
+	83, 82, 81, 80, 79, 78, 77, 76,
+	75, 74, 73, 72, 71, 70, 69, 68,
+}
+
 // newTestSigningKey generates a fresh signing key via an in-memory store.
 func newTestSigningKey(t *testing.T) (*store.SigningKey, *store.Store) {
 	t.Helper()
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", tokenTestKEK)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

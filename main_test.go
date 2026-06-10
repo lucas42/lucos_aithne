@@ -36,7 +36,7 @@ func newTestWebAuthn(t *testing.T) *gwebauthn.WebAuthn {
 }
 
 func TestInfoEndpoint(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -90,6 +90,15 @@ func TestInfoEndpoint(t *testing.T) {
 
 const testIssuer = "http://aithne.test"
 const testAudience = "l42.eu"
+
+// testMainKEK is a deterministic 32-byte KEK used by main_test.go tests.
+// Must not be used in production. The store package has its own testKEK.
+var testMainKEK = [32]byte{
+	10, 20, 30, 40, 50, 60, 70, 80,
+	90, 100, 110, 120, 130, 140, 150, 160,
+	170, 180, 190, 200, 210, 220, 230, 240,
+	1, 2, 3, 4, 5, 6, 7, 8,
+}
 
 // testVocab is a minimal vocabulary for main package tests.
 var testMainVocab = func() *store.Vocabulary {
@@ -188,7 +197,7 @@ func TestParseScopesYAML_EmptyReturnsError(t *testing.T) {
 // --- Admin endpoint auth tests ---
 
 func TestAdminGrants_RejectsNoToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -207,7 +216,7 @@ func TestAdminGrants_RejectsNoToken(t *testing.T) {
 }
 
 func TestAdminGrants_RejectsInvalidToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -227,7 +236,7 @@ func TestAdminGrants_RejectsInvalidToken(t *testing.T) {
 }
 
 func TestAdminGrants_RejectsMissingAdminScope(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -252,7 +261,7 @@ func TestAdminGrants_RejectsMissingAdminScope(t *testing.T) {
 // --- Admin grant list/create/revoke tests ---
 
 func TestAdminGrants_ListEmpty(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -283,7 +292,7 @@ func TestAdminGrants_ListEmpty(t *testing.T) {
 }
 
 func TestAdminGrants_CreateAndList(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -340,7 +349,7 @@ func TestAdminGrants_CreateAndList(t *testing.T) {
 }
 
 func TestAdminGrants_Create_UnknownScope(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -369,7 +378,7 @@ func TestAdminGrants_Create_UnknownScope(t *testing.T) {
 }
 
 func TestAdminGrants_Create_DuplicateActive(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -406,7 +415,7 @@ func TestAdminGrants_Create_DuplicateActive(t *testing.T) {
 }
 
 func TestAdminGrantByID_Revoke(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -444,7 +453,7 @@ func TestAdminGrantByID_Revoke(t *testing.T) {
 }
 
 func TestAdminGrantByID_Revoke_NotFound(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -465,7 +474,7 @@ func TestAdminGrantByID_Revoke_NotFound(t *testing.T) {
 }
 
 func TestJWKSEndpoint_Wired(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -532,7 +541,7 @@ func TestServeStaticFile_RejectsPost(t *testing.T) {
 // --- Enrolment begin tests ---
 
 func TestEnrolBegin_RejectsNonPost(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -550,7 +559,7 @@ func TestEnrolBegin_RejectsNonPost(t *testing.T) {
 }
 
 func TestEnrolBegin_MissingToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -568,7 +577,7 @@ func TestEnrolBegin_MissingToken(t *testing.T) {
 }
 
 func TestEnrolBegin_InvalidToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -586,7 +595,7 @@ func TestEnrolBegin_InvalidToken(t *testing.T) {
 }
 
 func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -620,7 +629,7 @@ func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
 func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
 	// Verifies that calling begin does not mark the invite as used —
 	// so a browser crash between begin and finish doesn't permanently burn it.
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -647,7 +656,7 @@ func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
 // --- Enrolment finish tests ---
 
 func TestEnrolFinish_RejectsNonPost(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -665,7 +674,7 @@ func TestEnrolFinish_RejectsNonPost(t *testing.T) {
 }
 
 func TestEnrolFinish_MissingToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -684,7 +693,7 @@ func TestEnrolFinish_MissingToken(t *testing.T) {
 
 func TestEnrolFinish_NoSession(t *testing.T) {
 	// begin was never called (or session expired).
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -704,7 +713,7 @@ func TestEnrolFinish_NoSession(t *testing.T) {
 // --- Enrolment page tests ---
 
 func TestEnrolPage_RejectsNonGet(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -721,7 +730,7 @@ func TestEnrolPage_RejectsNonGet(t *testing.T) {
 }
 
 func TestEnrolPage_MissingToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -738,7 +747,7 @@ func TestEnrolPage_MissingToken(t *testing.T) {
 }
 
 func TestEnrolPage_InvalidToken_RendersErrorPage(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -762,7 +771,7 @@ func TestEnrolPage_InvalidToken_RendersErrorPage(t *testing.T) {
 // --- Admin invites tests ---
 
 func TestAdminInvites_RejectsNoToken(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -781,7 +790,7 @@ func TestAdminInvites_RejectsNoToken(t *testing.T) {
 }
 
 func TestAdminInvites_MissingContactID(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -806,7 +815,7 @@ func TestAdminInvites_MissingContactID(t *testing.T) {
 // --- Store invite tests ---
 
 func TestStore_CreateAndGetInvite(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -846,7 +855,7 @@ func TestStore_CreateAndGetInvite(t *testing.T) {
 }
 
 func TestStore_GetInvite_NotFound(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -860,7 +869,7 @@ func TestStore_GetInvite_NotFound(t *testing.T) {
 
 func TestStore_ReplaceWebAuthnCredentialAndConsumeInvite_AtomicWipe(t *testing.T) {
 	// Verifies the atomic transaction: old creds are wiped, new one inserted, invite consumed.
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -913,7 +922,7 @@ func TestStore_ReplaceWebAuthnCredentialAndConsumeInvite_AtomicWipe(t *testing.T
 }
 
 func TestLoginBegin_GhostPrincipal(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -936,7 +945,7 @@ func TestLoginBegin_GhostPrincipal(t *testing.T) {
 }
 
 func TestLoginBegin_PrincipalWithNoCredentials(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -962,7 +971,7 @@ func TestLoginBegin_PrincipalWithNoCredentials(t *testing.T) {
 }
 
 func TestLoginBegin_EmptyContactID_Discoverable(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -998,7 +1007,7 @@ func TestLoginBegin_EmptyContactID_Discoverable(t *testing.T) {
 }
 
 func TestLoginFinish_DiscoverableNoSession(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1021,7 +1030,7 @@ func TestLoginFinish_DiscoverableNoSession(t *testing.T) {
 }
 
 func TestLoginFinish_NoSession(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1044,7 +1053,7 @@ func TestLoginFinish_NoSession(t *testing.T) {
 }
 
 func TestLoginFinish_NeitherContactIDNorSession(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1132,7 +1141,7 @@ func provisionMachineKey(t *testing.T, s *store.Store, agentSlug string) string 
 }
 
 func TestClientCredentials_Success(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1166,7 +1175,7 @@ func TestClientCredentials_Success(t *testing.T) {
 }
 
 func TestClientCredentials_TokenCarriesAgentClass(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1211,7 +1220,7 @@ func TestClientCredentials_TokenCarriesAgentClass(t *testing.T) {
 }
 
 func TestClientCredentials_WrongSecret(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1239,7 +1248,7 @@ func TestClientCredentials_WrongSecret(t *testing.T) {
 }
 
 func TestClientCredentials_UnknownClientID(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1262,7 +1271,7 @@ func TestClientCredentials_UnknownClientID(t *testing.T) {
 }
 
 func TestClientCredentials_MissingCredentials(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1285,7 +1294,7 @@ func TestClientCredentials_MissingCredentials(t *testing.T) {
 }
 
 func TestClientCredentials_WrongGrantType(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1308,7 +1317,7 @@ func TestClientCredentials_WrongGrantType(t *testing.T) {
 }
 
 func TestClientCredentials_MethodNotAllowed(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1324,7 +1333,7 @@ func TestClientCredentials_MethodNotAllowed(t *testing.T) {
 }
 
 func TestAdminMachineKeys_Create(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1360,7 +1369,7 @@ func TestAdminMachineKeys_Create(t *testing.T) {
 }
 
 func TestAdminMachineKeys_SecretUsableForTokenExchange(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1399,7 +1408,7 @@ func TestAdminMachineKeys_SecretUsableForTokenExchange(t *testing.T) {
 }
 
 func TestAdminMachineKeys_RequiresAdminScope(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1420,7 +1429,7 @@ func TestAdminMachineKeys_RequiresAdminScope(t *testing.T) {
 }
 
 func TestAdminMachineKeys_MissingSlug(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1449,7 +1458,7 @@ func newRotationMux(s *store.Store) *http.ServeMux {
 }
 
 func TestAdminRotateSigningKey_Success(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1497,7 +1506,7 @@ func TestAdminRotateSigningKey_Success(t *testing.T) {
 }
 
 func TestAdminRotateSigningKey_RequiresAdminScope(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1515,7 +1524,7 @@ func TestAdminRotateSigningKey_RequiresAdminScope(t *testing.T) {
 }
 
 func TestAdminRotateSigningKey_MethodNotAllowed(t *testing.T) {
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
@@ -1535,7 +1544,7 @@ func TestAdminRotateSigningKey_MethodNotAllowed(t *testing.T) {
 func TestAdminRotateSigningKey_OldKeyStillVerifies(t *testing.T) {
 	// Verify that a token minted with the old key is still valid after rotation
 	// (ListVerificationKeys covers in-flight tokens during the VerificationWindow).
-	s, err := store.Open(":memory:")
+	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
