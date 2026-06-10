@@ -12,7 +12,7 @@ The design rationale is in [ADR-0002](../adr/0002-bootstrapping-the-first-admin.
 This file is the procedure.
 
 > **Depends on** the `--bootstrap-invite` subcommand and the `bootstrapAdmin`
-> credential gate (lucas42/lucos_aithne#48 implementation). If those are not yet
+> credential gate (lucas42/lucos_aithne#49 implementation). If those are not yet
 > deployed, only the *fallback direct DB insert* at the bottom applies.
 
 ---

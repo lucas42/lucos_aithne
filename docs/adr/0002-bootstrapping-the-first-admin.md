@@ -1,10 +1,10 @@
 # ADR-0002: Bootstrapping the first admin passkey
 
-- **Status:** Proposed
-- **Date:** 2026-06-10
-- **Supplements:** [ADR-0001 §6 (authorisation)](0001-foundational-design.md) and its rejected
-  *"≥2 registered passkeys / recovery codes"* alternative.
-- **Issue:** [lucas42/lucos_aithne#48](https://github.com/lucas42/lucos_aithne/issues/48)
+**Date:** 2026-06-10
+**Status:** Accepted
+**Accepted:** 2026-06-10 — approved by lucas42 (PR #50)
+**Supplements:** [ADR-0001 §6 (authorisation)](0001-foundational-design.md) and its rejected *"≥2 registered passkeys / recovery codes"* alternative.
+**Issue:** [lucas42/lucos_aithne#48](https://github.com/lucas42/lucos_aithne/issues/48)
 
 ## Context
 
