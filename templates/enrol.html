@@ -91,9 +91,9 @@
   <div class="card">
     <h1>lucOS</h1>
     {{if .IsRecovery}}
-    <p class="subtitle">Create a new passkey for <strong>{{.DisplayName}}</strong>.</p>
+    <p class="subtitle">You're replacing access for <strong>{{.DisplayName}}</strong>. Your old passkey will still work until you sign in with the new one.</p>
     {{else}}
-    <p class="subtitle">Set up access for <strong>{{.DisplayName}}</strong>.</p>
+    <p class="subtitle">You're setting up access for <strong>{{.DisplayName}}</strong>.</p>
     {{end}}
 
     <form id="enrolForm" novalidate>

@@ -124,8 +124,12 @@ type enrolErrorPageData struct {
 }
 
 // adminEnrolPageData is the data passed to templates/admin_enrol.html.
-// Currently empty — the page is fully client-driven (calls POST /admin/invites).
-type adminEnrolPageData struct{}
+// SessionToken is the raw JWT from the aithne_session cookie, injected by the
+// server so the template can embed it as {{.SessionToken | js}} for AJAX calls.
+// The cookie is HttpOnly, so JS cannot read it from document.cookie.
+type adminEnrolPageData struct {
+	SessionToken string
+}
 
 // renderTemplate parses and executes a named template from the binary, writing
 // the result to w. On error it writes a plain 500 response.
@@ -146,13 +150,16 @@ func renderTemplate(w http.ResponseWriter, name string, data any) {
 // --- Admin enrolment page ---
 
 // handleAdminEnrolPage serves GET /admin/enrol — the admin invite-generation page.
+// requireAdminScopeFromCookie must wrap this handler; it validates the session
+// cookie and injects the raw JWT into ctx via rawTokenContextKey.
 func handleAdminEnrolPage() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		renderTemplate(w, "admin_enrol.html", adminEnrolPageData{})
+		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
+		renderTemplate(w, "admin_enrol.html", adminEnrolPageData{SessionToken: sessionToken})
 	}
 }
 

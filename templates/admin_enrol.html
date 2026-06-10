@@ -112,13 +112,17 @@
 
     <div class="result" id="resultBox" hidden>
       <p>Send this link to the contact. It expires in 24 hours and can only be used once.</p>
-      <div class="result-url" id="inviteUrl" aria-label="Invite URL"></div>
+      <output class="result-url" id="inviteUrl" aria-label="Invite URL" aria-live="polite"></output>
       <button class="copy-btn" id="copyBtn" type="button">Copy link</button>
       <p class="expires" id="expiresText"></p>
     </div>
   </div>
 
   <script>
+    // Session token injected by the server — the aithne_session cookie is
+    // HttpOnly, so JavaScript cannot read it from document.cookie.
+    const sessionToken = {{.SessionToken | js}};
+
     const form      = document.getElementById('inviteForm');
     const btn       = document.getElementById('submitBtn');
     const errorBox  = document.getElementById('errorBox');
@@ -143,12 +147,6 @@
       btn.textContent = yes ? 'Generating…' : 'Generate invite link';
     }
 
-    // Read Bearer token from the session cookie (set by /auth/login/finish).
-    function getSessionToken() {
-      const m = document.cookie.match(/(?:^|;\s*)aithne_session=([^;]+)/);
-      return m ? decodeURIComponent(m[1]) : null;
-    }
-
     form.addEventListener('submit', async function(e) {
       e.preventDefault();
       clearError();
@@ -157,12 +155,7 @@
       const contactId = document.getElementById('contactId').value.trim();
       if (!contactId) { showError('Enter a contact ID.'); return; }
 
-      const token = getSessionToken();
-      if (!token) {
-        showError('You are not signed in. Please sign in with an admin passkey first.');
-        return;
-      }
-
+      const token = sessionToken;
       setPending(true);
       try {
         const resp = await fetch('/admin/invites', {

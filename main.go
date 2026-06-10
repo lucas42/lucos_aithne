@@ -28,7 +28,10 @@ import (
 // collisions with other packages that also store values in request contexts.
 type contextKey int
 
-const claimsContextKey contextKey = iota
+const (
+	claimsContextKey   contextKey = iota
+	rawTokenContextKey            // raw JWT string, set by requireAdminScopeFromCookie
+)
 
 // scopes.yaml is embedded at build time.
 // In Docker CI builds the Dockerfile replaces this with the canonical
@@ -287,6 +290,61 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 	}
 }
 
+// requireAdminScopeFromCookie is like requireAdminScope but reads the session
+// token from the aithne_session cookie instead of the Authorization header.
+// It is used for browser-rendered admin pages (GET requests) where no
+// Authorization header is present. On success it injects both the parsed claims
+// (claimsContextKey) and the raw JWT string (rawTokenContextKey) into the
+// request context so handlers can embed the token in HTML templates for AJAX.
+// Unauthenticated requests are redirected to /auth/login?next=<current path>.
+func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("aithne_session")
+		if err != nil {
+			// No cookie — redirect to login and come back.
+			http.Redirect(w, r, "/auth/login?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+		tokenStr := cookie.Value
+
+		keys, err := s.ListVerificationKeys(token.VerificationWindow)
+		if err != nil {
+			log.Printf("requireAdminScopeFromCookie: list verification keys: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		keySet, err := token.BuildVerificationKeySet(keys)
+		if err != nil {
+			log.Printf("requireAdminScopeFromCookie: build key set: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		claims, err := token.ParseSession(tokenStr, keySet, issuer, "l42.eu")
+		if err != nil {
+			// Invalid or expired cookie — redirect to login to refresh.
+			http.Redirect(w, r, "/auth/login?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+
+		hasAdmin := false
+		for _, sc := range claims.Scopes {
+			if sc == "aithne:admin" {
+				hasAdmin = true
+				break
+			}
+		}
+		if !hasAdmin {
+			http.Error(w, "403 Forbidden — aithne:admin scope required", http.StatusForbidden)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
+		ctx = context.WithValue(ctx, rawTokenContextKey, tokenStr)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 // handleGrants dispatches GET (list) and POST (create) for /admin/grants.
 func handleGrants(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -508,7 +566,7 @@ func main() {
 	// Admin enrolment surface (all gated on aithne:admin scope).
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
-	mux.HandleFunc("/admin/enrol", requireAdminScope(s, issuer, handleAdminEnrolPage()))
+	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
 
 	// Invitee enrolment flow — invite-gated, no auth required.
