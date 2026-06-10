@@ -412,6 +412,13 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 	}
 }
 
+// registrationDisabled is an http.HandlerFunc that returns 503 Service
+// Unavailable for all unauthenticated registration endpoints.
+// Used when REGISTRATION_ENABLED is not set to "true" (the default).
+var registrationDisabled http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "503 Service Unavailable — registration is currently disabled", http.StatusServiceUnavailable)
+}
+
 // serveStaticFile returns an http.HandlerFunc that serves a single embedded
 // file from staticFS at the given path (e.g. "static/login.html").
 func serveStaticFile(fsys fs.FS, path string) http.HandlerFunc {
@@ -487,15 +494,28 @@ func main() {
 		return s.ListVerificationKeys(token.VerificationWindow)
 	}))
 
-	// Passkey login/registration pages (HTML).
+	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
-	mux.HandleFunc("/auth/register", serveStaticFile(staticFS, "static/register.html"))
 
-	// WebAuthn ceremony endpoints (JSON API, consumed by the HTML pages above).
+	// WebAuthn login ceremony endpoints.
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
-	mux.HandleFunc("/auth/register/begin", handleRegisterBegin(s, wa, cs))
-	mux.HandleFunc("/auth/register/finish", handleRegisterFinish(s, wa, cs))
+
+	// WebAuthn registration endpoints are gated behind REGISTRATION_ENABLED (default off).
+	// This is a temporary kill-switch (lucos_aithne#37) until the token-gated enrolment
+	// flow (lucos_aithne#10) lands and replaces these unauthenticated placeholders entirely.
+	registrationEnabled := os.Getenv("REGISTRATION_ENABLED") == "true"
+	if registrationEnabled {
+		log.Printf("WARNING: unauthenticated registration endpoints enabled (REGISTRATION_ENABLED=true) — not safe for production until #10 lands")
+		mux.HandleFunc("/auth/register", serveStaticFile(staticFS, "static/register.html"))
+		mux.HandleFunc("/auth/register/begin", handleRegisterBegin(s, wa, cs))
+		mux.HandleFunc("/auth/register/finish", handleRegisterFinish(s, wa, cs))
+	} else {
+		log.Printf("Registration endpoints disabled (REGISTRATION_ENABLED not set to true). Use the admin-invite enrolment flow (#10) when it lands.")
+		mux.HandleFunc("/auth/register", registrationDisabled)
+		mux.HandleFunc("/auth/register/begin", registrationDisabled)
+		mux.HandleFunc("/auth/register/finish", registrationDisabled)
+	}
 
 	// Admin grant-management surface (all gated on aithne:admin scope).
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))

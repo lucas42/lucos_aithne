@@ -461,6 +461,19 @@ func TestJWKSEndpoint_Wired(t *testing.T) {
 	}
 }
 
+// --- registrationDisabled handler tests ---
+
+func TestRegistrationDisabled_Returns503(t *testing.T) {
+	for _, path := range []string{"/auth/register", "/auth/register/begin", "/auth/register/finish"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		registrationDisabled(rr, req)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("registrationDisabled on %s: expected 503, got %d", path, rr.Code)
+		}
+	}
+}
+
 // --- Static file handler tests ---
 
 func TestServeStaticFile_LoginPage(t *testing.T) {
