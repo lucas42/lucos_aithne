@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"lucos_aithne/store"
+	"lucos_aithne/token"
 )
 
 const healthcheckTimeout = 5 * time.Second
@@ -123,8 +124,19 @@ func main() {
 	defer s.Close()
 	log.Printf("Principal/credential store ready at %s", dbPath)
 
+	// Ensure an active signing key exists before we start serving.
+	// On first boot this generates a fresh ES256 key; on subsequent boots it
+	// reuses the persisted key from the SQLite store.
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		log.Fatalf("Failed to initialise signing key: %v", err)
+	}
+	log.Printf("Signing key initialised")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_info", handleInfo(system, s))
+	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
+		return s.ListVerificationKeys(token.VerificationWindow)
+	}))
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting lucos_aithne — system=%s, listening on %s", system, addr)
