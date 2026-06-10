@@ -1096,3 +1096,345 @@ func TestCeremonyStore_OneTimeUse(t *testing.T) {
 		t.Error("second take should return nothing (session already consumed)")
 	}
 }
+
+// --- Machine/agent authentication tests ---
+
+// newMachineAuthMux builds a test ServeMux with the oauth2/token and
+// admin/machine-keys endpoints registered.
+func newMachineAuthMux(s *store.Store) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, testIssuer, "development"))
+	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
+	return mux
+}
+
+// provisionMachineKey creates an agent principal (if needed) and a machine_key
+// credential for agentSlug. Returns the raw client_secret.
+func provisionMachineKey(t *testing.T, s *store.Store, agentSlug string) string {
+	t.Helper()
+	// Ensure the principal exists.
+	p, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, agentSlug)
+	if err != nil {
+		if err != store.ErrNotFound {
+			t.Fatalf("provisionMachineKey: GetPrincipalByExternalID: %v", err)
+		}
+		p, err = s.CreatePrincipal(store.PrincipalClassAgent, agentSlug)
+		if err != nil {
+			t.Fatalf("provisionMachineKey: CreatePrincipal: %v", err)
+		}
+	}
+	rawSecret := "test-secret-" + agentSlug
+	secretHash := hashMachineKey(rawSecret)
+	if _, err := s.CreateCredential(p.ID, store.CredentialTypeMachineKey, []byte(secretHash), "test"); err != nil {
+		t.Fatalf("provisionMachineKey: CreateCredential: %v", err)
+	}
+	return rawSecret
+}
+
+func TestClientCredentials_Success(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-test-agent")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-test-agent&client_secret=" + rawSecret)
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp tokenSuccessResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.TokenType != "Bearer" {
+		t.Errorf("token_type: got %q, want %q", resp.TokenType, "Bearer")
+	}
+	if resp.AccessToken == "" {
+		t.Error("access_token must not be empty")
+	}
+	if resp.ExpiresIn <= 0 {
+		t.Errorf("expires_in: got %d, want > 0", resp.ExpiresIn)
+	}
+}
+
+func TestClientCredentials_TokenCarriesAgentClass(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-arch-agent")
+	// Grant a scope so we can verify it appears in the token.
+	p, _ := s.GetPrincipalByExternalID(store.PrincipalClassAgent, "lucos-arch-agent")
+	vocab, _ := parseScopesYAML([]byte("scopes:\n  - render-ui\n  - aithne:admin\n"))
+	if _, err := s.CreateGrant(p.ID, "render-ui", "development", "bootstrap", vocab); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-arch-agent&client_secret=" + rawSecret)
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp tokenSuccessResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+
+	// Parse the minted JWT and verify principal_class and scopes.
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(resp.AccessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if claims.PrincipalClass != store.PrincipalClassAgent {
+		t.Errorf("principal_class: got %q, want %q", claims.PrincipalClass, store.PrincipalClassAgent)
+	}
+	if claims.Subject != "lucos-arch-agent" {
+		t.Errorf("sub: got %q, want %q", claims.Subject, "lucos-arch-agent")
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "render-ui" {
+		t.Errorf("scopes: got %v, want [render-ui]", claims.Scopes)
+	}
+}
+
+func TestClientCredentials_WrongSecret(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	provisionMachineKey(t, s, "lucos-test-agent")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-test-agent&client_secret=wrong-secret")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	var errResp tokenErrorResponse
+	_ = json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "invalid_client" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_client")
+	}
+	if rr.Header().Get("WWW-Authenticate") == "" {
+		t.Error("WWW-Authenticate header missing on 401")
+	}
+}
+
+func TestClientCredentials_UnknownClientID(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=no-such-agent&client_secret=any")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	var errResp tokenErrorResponse
+	_ = json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "invalid_client" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_client")
+	}
+}
+
+func TestClientCredentials_MissingCredentials(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	body := strings.NewReader("grant_type=client_credentials")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	var errResp tokenErrorResponse
+	_ = json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "invalid_client" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_client")
+	}
+}
+
+func TestClientCredentials_WrongGrantType(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	body := strings.NewReader("grant_type=authorization_code&client_id=foo&client_secret=bar")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	var errResp tokenErrorResponse
+	_ = json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "unsupported_grant_type" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "unsupported_grant_type")
+	}
+}
+
+func TestClientCredentials_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/token", nil)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAdminMachineKeys_Create(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	body := bytes.NewBufferString(`{"agent_slug":"lucos-test-agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/machine-keys", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp createMachineKeyResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ClientID != "lucos-test-agent" {
+		t.Errorf("client_id: got %q, want %q", resp.ClientID, "lucos-test-agent")
+	}
+	if resp.ClientSecret == "" {
+		t.Error("client_secret must not be empty")
+	}
+	if resp.CredentialID == "" {
+		t.Error("credential_id must not be empty")
+	}
+	if resp.Note == "" {
+		t.Error("note must not be empty")
+	}
+}
+
+func TestAdminMachineKeys_SecretUsableForTokenExchange(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// 1. Provision machine key via admin endpoint.
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	body := bytes.NewBufferString(`{"agent_slug":"lucos-e2e-agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/machine-keys", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("provision: expected 201, got %d", rr.Code)
+	}
+	var provResp createMachineKeyResponse
+	_ = json.NewDecoder(rr.Body).Decode(&provResp)
+
+	// 2. Exchange the returned secret for a session token.
+	tokenBody := strings.NewReader(
+		"grant_type=client_credentials&client_id=lucos-e2e-agent&client_secret=" + provResp.ClientSecret,
+	)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", tokenBody)
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRR := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(tokenRR, tokenReq)
+	if tokenRR.Code != http.StatusOK {
+		t.Fatalf("token exchange: expected 200, got %d — body: %s", tokenRR.Code, tokenRR.Body.String())
+	}
+	var tokenResp tokenSuccessResponse
+	_ = json.NewDecoder(tokenRR.Body).Decode(&tokenResp)
+	if tokenResp.AccessToken == "" {
+		t.Error("access_token must not be empty")
+	}
+}
+
+func TestAdminMachineKeys_RequiresAdminScope(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// Token without aithne:admin scope.
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	body := bytes.NewBufferString(`{"agent_slug":"lucos-test-agent"}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/machine-keys", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestAdminMachineKeys_MissingSlug(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	body := bytes.NewBufferString(`{}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/machine-keys", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+}
