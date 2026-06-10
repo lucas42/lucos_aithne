@@ -542,6 +542,11 @@ func main() {
 
 	// Read the signing key KEK from the environment. Must be exactly 32 bytes
 	// for AES-256-GCM. Stored in lucos_creds as SIGNING_KEK.
+	//
+	// The value MUST be randomly generated — not a human-typed passphrase.
+	// Generate a suitable value with:
+	//   openssl rand -base64 32 | head -c 32
+	// Store the result in lucos_creds; never commit it to source control.
 	signingKEKStr := getEnvRequired("SIGNING_KEK")
 	if len(signingKEKStr) != 32 {
 		log.Fatalf("SIGNING_KEK must be exactly 32 bytes, got %d", len(signingKEKStr))
