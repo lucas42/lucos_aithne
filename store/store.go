@@ -137,6 +137,17 @@ func (s *Store) migrate() error {
 			label        TEXT NOT NULL DEFAULT '',
 			created_at   DATETIME NOT NULL DEFAULT (datetime('now'))
 		)`,
+		// signing_keys stores EC P-256 private keys used to sign session JWTs.
+		// The id is used as the JWK "kid" header so verifiers can look up the
+		// correct public key from the JWKS endpoint.
+		`CREATE TABLE IF NOT EXISTS signing_keys (
+			id          TEXT PRIMARY KEY,
+			status      TEXT NOT NULL CHECK(status IN ('active', 'retired')),
+			algorithm   TEXT NOT NULL,
+			private_key BLOB NOT NULL,
+			created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+			retired_at  DATETIME
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

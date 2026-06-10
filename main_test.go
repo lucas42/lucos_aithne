@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"lucos_aithne/store"
+	"lucos_aithne/token"
 )
 
 func TestInfoEndpoint(t *testing.T) {
@@ -57,5 +59,35 @@ func TestInfoEndpoint(t *testing.T) {
 	}
 	if _, ok := payload["metrics"]; !ok {
 		t.Error("metrics field missing from /_info response")
+	}
+}
+
+func TestJWKSEndpoint_Wired(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// Ensure an active signing key exists (mirrors main() startup).
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
+		return s.ListVerificationKeys(token.VerificationWindow)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"keys"`) {
+		t.Errorf("JWKS response missing 'keys' field: %s", body)
 	}
 }
