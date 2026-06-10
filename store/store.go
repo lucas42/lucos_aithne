@@ -12,7 +12,9 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,6 +79,12 @@ var (
 
 	// ErrDuplicate is returned when (class, external_id) is already registered.
 	ErrDuplicate = errors.New("store: duplicate principal (class + external_id must be unique)")
+
+	// ErrInviteExpired is returned when the invite token has passed its expires_at.
+	ErrInviteExpired = errors.New("store: enrolment invite has expired")
+
+	// ErrInviteUsed is returned when the invite token has already been consumed.
+	ErrInviteUsed = errors.New("store: enrolment invite has already been used")
 )
 
 // Store manages aithne's principal registry and credential store via SQLite.
@@ -166,6 +174,19 @@ func (s *Store) migrate() error {
 		// can be re-granted.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_active
 		 ON grants(principal_id, scope, environment) WHERE revoked_at IS NULL`,
+		// enrolment_invites stores admin-issued single-use tokens that authorise
+		// a passkey registration ceremony for a specific contact.
+		// token_hash is SHA-256(rawToken) hex — the raw token is never stored,
+		// only returned to the admin at creation time. This limits exposure if the
+		// SQLite file is ever read by an unauthorised party.
+		`CREATE TABLE IF NOT EXISTS enrolment_invites (
+			token_hash  TEXT PRIMARY KEY,
+			contact_id  TEXT NOT NULL,
+			created_by  TEXT NOT NULL,
+			created_at  DATETIME NOT NULL,
+			expires_at  DATETIME NOT NULL,
+			used_at     DATETIME
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -452,6 +473,83 @@ func newID() (string, error) {
 	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// HashToken returns the hex-encoded SHA-256 of rawToken.
+// This is the value stored in the enrolment_invites table.
+func HashToken(rawToken string) string {
+	sum := sha256.Sum256([]byte(rawToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// ReplaceWebAuthnCredentialAndConsumeInvite atomically:
+//  1. Deletes all existing WebAuthn credentials for principalID.
+//  2. Inserts a new WebAuthn credential.
+//  3. Marks the enrolment invite identified by rawToken as used.
+//
+// All three steps execute in a single SQLite transaction. This ensures that a
+// re-enrolment (recovery) wipes the old compromised passkey, registers the new
+// one, and consumes the invite — or rolls back entirely on any failure.
+// Returns the newly created Credential on success.
+func (s *Store) ReplaceWebAuthnCredentialAndConsumeInvite(principalID, rawToken string, data []byte, label string) (*Credential, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("store: begin transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck — deferred rollback is a no-op after commit
+
+	// 1. Wipe all existing WebAuthn credentials for this principal.
+	if _, err := tx.Exec(
+		`DELETE FROM credentials WHERE principal_id = ? AND type = 'webauthn'`,
+		principalID,
+	); err != nil {
+		return nil, fmt.Errorf("store: delete existing webauthn credentials: %w", err)
+	}
+
+	// 2. Insert the new credential.
+	id, err := newID()
+	if err != nil {
+		return nil, fmt.Errorf("store: generate credential id: %w", err)
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(
+		`INSERT INTO credentials (id, principal_id, type, data, label, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, principalID, string(CredentialTypeWebAuthn), data, label, now.Format(time.RFC3339),
+	); err != nil {
+		return nil, fmt.Errorf("store: insert new credential: %w", err)
+	}
+
+	// 3. Consume the invite (set used_at).
+	tokenHash := HashToken(rawToken)
+	res, err := tx.Exec(
+		`UPDATE enrolment_invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`,
+		now.Format(time.RFC3339), tokenHash,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: consume invite: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: consume invite rows-affected: %w", err)
+	}
+	if n == 0 {
+		// Either the invite doesn't exist or it was already used — both are
+		// unexpected at this point in the flow (begin already validated it).
+		return nil, ErrInviteUsed
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit transaction: %w", err)
+	}
+
+	return &Credential{
+		ID:          id,
+		PrincipalID: principalID,
+		Type:        CredentialTypeWebAuthn,
+		Data:        data,
+		Label:       label,
+		CreatedAt:   now,
+	}, nil
 }
 
 // isUniqueViolation reports whether err is a SQLite UNIQUE constraint error.

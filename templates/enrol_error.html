@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if eq .Reason "expired"}}Invite expired{{else if eq .Reason "used"}}Invite already used{{else}}Invite not valid{{end}} — lucOS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a1a;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    h2 { font-size: 1rem; margin-bottom: .625rem; color: #1a1a1a; }
+    p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
+    a {
+      color: #0066cc;
+      text-decoration: none;
+      font-size: .875rem;
+    }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>lucOS</h1>
+    {{if eq .Reason "not_found"}}
+    <h2>Invite not valid</h2>
+    <p>This invite link isn't valid. Contact lucas42 to get a new one.</p>
+    {{else if eq .Reason "expired"}}
+    <h2>Invite expired</h2>
+    <p>This invite has expired. Contact lucas42 to get a new one.</p>
+    {{else if eq .Reason "used"}}
+    <h2>Invite already used</h2>
+    <p>This invite has already been used. If you need help signing in, contact lucas42.</p>
+    {{else}}
+    <h2>Invite not valid</h2>
+    <p>This invite link isn't valid. Contact lucas42 to get a new one.</p>
+    {{end}}
+    <a href="/auth/login">← Back to sign in</a>
+  </div>
+</body>
+</html>

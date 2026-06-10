@@ -28,7 +28,10 @@ import (
 // collisions with other packages that also store values in request contexts.
 type contextKey int
 
-const claimsContextKey contextKey = iota
+const (
+	claimsContextKey   contextKey = iota
+	rawTokenContextKey            // raw JWT string, set by requireAdminScopeFromCookie
+)
 
 // scopes.yaml is embedded at build time.
 // In Docker CI builds the Dockerfile replaces this with the canonical
@@ -39,11 +42,16 @@ const claimsContextKey contextKey = iota
 //go:embed scopes.yaml
 var scopesYAML []byte
 
-// staticFS embeds the static/ directory so the HTML login/registration pages
-// are served by the single binary (required for the scratch runtime image).
+// staticFS embeds the static/ directory so the HTML login page
+// is served by the single binary (required for the scratch runtime image).
 //
 //go:embed static
 var staticFS embed.FS
+
+// templateFS embeds the templates/ directory for server-rendered Go templates.
+//
+//go:embed templates
+var templateFS embed.FS
 
 const healthcheckTimeout = 5 * time.Second
 
@@ -282,6 +290,61 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 	}
 }
 
+// requireAdminScopeFromCookie is like requireAdminScope but reads the session
+// token from the aithne_session cookie instead of the Authorization header.
+// It is used for browser-rendered admin pages (GET requests) where no
+// Authorization header is present. On success it injects both the parsed claims
+// (claimsContextKey) and the raw JWT string (rawTokenContextKey) into the
+// request context so handlers can embed the token in HTML templates for AJAX.
+// Unauthenticated requests are redirected to /auth/login?next=<current path>.
+func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("aithne_session")
+		if err != nil {
+			// No cookie — redirect to login and come back.
+			http.Redirect(w, r, "/auth/login?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+		tokenStr := cookie.Value
+
+		keys, err := s.ListVerificationKeys(token.VerificationWindow)
+		if err != nil {
+			log.Printf("requireAdminScopeFromCookie: list verification keys: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		keySet, err := token.BuildVerificationKeySet(keys)
+		if err != nil {
+			log.Printf("requireAdminScopeFromCookie: build key set: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		claims, err := token.ParseSession(tokenStr, keySet, issuer, "l42.eu")
+		if err != nil {
+			// Invalid or expired cookie — redirect to login to refresh.
+			http.Redirect(w, r, "/auth/login?next="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+
+		hasAdmin := false
+		for _, sc := range claims.Scopes {
+			if sc == "aithne:admin" {
+				hasAdmin = true
+				break
+			}
+		}
+		if !hasAdmin {
+			http.Error(w, "403 Forbidden — aithne:admin scope required", http.StatusForbidden)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
+		ctx = context.WithValue(ctx, rawTokenContextKey, tokenStr)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 // handleGrants dispatches GET (list) and POST (create) for /admin/grants.
 func handleGrants(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -412,13 +475,6 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 	}
 }
 
-// registrationDisabled is an http.HandlerFunc that returns 503 Service
-// Unavailable for all unauthenticated registration endpoints.
-// Used when REGISTRATION_ENABLED is not set to "true" (the default).
-var registrationDisabled http.HandlerFunc = func(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "503 Service Unavailable — registration is currently disabled", http.StatusServiceUnavailable)
-}
-
 // serveStaticFile returns an http.HandlerFunc that serves a single embedded
 // file from staticFS at the given path (e.g. "static/login.html").
 func serveStaticFile(fsys fs.FS, path string) http.HandlerFunc {
@@ -469,10 +525,16 @@ func main() {
 	log.Printf("Signing key initialised")
 
 	// Bootstrap admin if BOOTSTRAP_ADMIN_CONTACT_ID is set.
-	// This is a development convenience until the proper enrolment flow (lucos_aithne#10).
+	// This is a development convenience for bootstrapping the first admin before
+	// the enrolment flow can be used (the enrolment flow itself requires admin access).
 	if adminContactID := os.Getenv("BOOTSTRAP_ADMIN_CONTACT_ID"); adminContactID != "" {
 		bootstrapAdmin(s, adminContactID, environment, vocab)
 	}
+
+	// Initialise the lucos_contacts client for contact verification and name lookup.
+	contactsOrigin := getEnvRequired("LUCOS_CONTACTS_ORIGIN")
+	contactsKey := getEnvRequired("KEY_LUCOS_CONTACTS")
+	contacts := newContactsClient(contactsOrigin, contactsKey)
 
 	// Initialise the WebAuthn relying party.
 	// RP ID = l42.eu (registrable parent domain per ADR-0001 §2): passkeys
@@ -501,25 +563,16 @@ func main() {
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
 
-	// WebAuthn registration endpoints are gated behind REGISTRATION_ENABLED (default off).
-	// This is a temporary kill-switch (lucos_aithne#37) until the token-gated enrolment
-	// flow (lucos_aithne#10) lands and replaces these unauthenticated placeholders entirely.
-	registrationEnabled := os.Getenv("REGISTRATION_ENABLED") == "true"
-	if registrationEnabled {
-		log.Printf("WARNING: unauthenticated registration endpoints enabled (REGISTRATION_ENABLED=true) — not safe for production until #10 lands")
-		mux.HandleFunc("/auth/register", serveStaticFile(staticFS, "static/register.html"))
-		mux.HandleFunc("/auth/register/begin", handleRegisterBegin(s, wa, cs))
-		mux.HandleFunc("/auth/register/finish", handleRegisterFinish(s, wa, cs))
-	} else {
-		log.Printf("Registration endpoints disabled (REGISTRATION_ENABLED not set to true). Use the admin-invite enrolment flow (#10) when it lands.")
-		mux.HandleFunc("/auth/register", registrationDisabled)
-		mux.HandleFunc("/auth/register/begin", registrationDisabled)
-		mux.HandleFunc("/auth/register/finish", registrationDisabled)
-	}
-
-	// Admin grant-management surface (all gated on aithne:admin scope).
+	// Admin enrolment surface (all gated on aithne:admin scope).
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
+	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
+
+	// Invitee enrolment flow — invite-gated, no auth required.
+	mux.HandleFunc("/enrol", handleEnrolPage(s, contacts))
+	mux.HandleFunc("/enrol/begin", handleEnrolBegin(s, wa, cs))
+	mux.HandleFunc("/enrol/finish", handleEnrolFinish(s, wa, cs))
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting lucos_aithne — system=%s, environment=%s, listening on %s", system, environment, addr)

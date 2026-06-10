@@ -12,7 +12,8 @@ services:
       - ENVIRONMENT
       - APP_ORIGIN
       - DB_PATH=/data/aithne.db
-      - REGISTRATION_ENABLED
+      - LUCOS_CONTACTS_ORIGIN
+      - KEY_LUCOS_CONTACTS
     volumes:
       - credential_store:/data
     healthcheck:

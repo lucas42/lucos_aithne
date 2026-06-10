@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Generate invite — lucOS Admin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a1a;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+      width: 100%;
+      max-width: 420px;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    .subtitle { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
+    label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .375rem; }
+    input[type="text"] {
+      display: block;
+      width: 100%;
+      padding: .5rem .75rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      outline: none;
+      transition: border-color .15s;
+      margin-bottom: 1rem;
+    }
+    input[type="text"]:focus { border-color: #0066cc; }
+    button {
+      display: block;
+      width: 100%;
+      padding: .625rem;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #0066cc;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    button:hover { background: #0052a3; }
+    button[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events: none; }
+    .result {
+      margin-top: 1.25rem;
+      padding: 1rem;
+      background: #f0f7ff;
+      border: 1px solid #b3d4f5;
+      border-radius: 6px;
+    }
+    .result[hidden] { display: none; }
+    .result p { font-size: .8rem; color: #555; margin-bottom: .5rem; }
+    .result-url {
+      font-family: monospace;
+      font-size: .8rem;
+      word-break: break-all;
+      color: #1a1a1a;
+      background: #e8f3ff;
+      padding: .5rem;
+      border-radius: 4px;
+      margin-bottom: .5rem;
+    }
+    .copy-btn {
+      display: inline-block;
+      width: auto;
+      padding: .375rem .75rem;
+      font-size: .8rem;
+      background: #0066cc;
+    }
+    .copy-btn:hover { background: #0052a3; }
+    .expires {
+      font-size: .75rem;
+      color: #777;
+      margin-top: .375rem;
+    }
+    .error {
+      background: #fff0f0;
+      border: 1px solid #f5c6cb;
+      border-radius: 6px;
+      padding: .625rem .75rem;
+      font-size: .875rem;
+      color: #c00;
+      margin-top: .75rem;
+    }
+    .error[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>lucOS Admin</h1>
+    <p class="subtitle">Generate a passkey enrolment invite for a contact.</p>
+
+    <form id="inviteForm" novalidate>
+      <label for="contactId">Contact ID</label>
+      <input type="text" id="contactId" name="contact_id"
+             placeholder="e.g. lucas" autocomplete="off" required>
+      <button type="submit" id="submitBtn">Generate invite link</button>
+    </form>
+    <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
+
+    <div class="result" id="resultBox" hidden>
+      <p>Send this link to the contact. It expires in 24 hours and can only be used once.</p>
+      <output class="result-url" id="inviteUrl" aria-label="Invite URL" aria-live="polite"></output>
+      <button class="copy-btn" id="copyBtn" type="button">Copy link</button>
+      <p class="expires" id="expiresText"></p>
+    </div>
+  </div>
+
+  <script>
+    // Session token injected by the server — the aithne_session cookie is
+    // HttpOnly, so JavaScript cannot read it from document.cookie.
+    const sessionToken = {{.SessionToken | js}};
+
+    const form      = document.getElementById('inviteForm');
+    const btn       = document.getElementById('submitBtn');
+    const errorBox  = document.getElementById('errorBox');
+    const resultBox = document.getElementById('resultBox');
+    const urlEl     = document.getElementById('inviteUrl');
+    const copyBtn   = document.getElementById('copyBtn');
+    const expiresEl = document.getElementById('expiresText');
+
+    function showError(msg) {
+      errorBox.textContent = msg;
+      errorBox.hidden = false;
+      errorBox.focus();
+    }
+
+    function clearError() {
+      errorBox.hidden = true;
+      errorBox.textContent = '';
+    }
+
+    function setPending(yes) {
+      btn.setAttribute('aria-disabled', yes ? 'true' : 'false');
+      btn.textContent = yes ? 'Generating…' : 'Generate invite link';
+    }
+
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      clearError();
+      resultBox.hidden = true;
+
+      const contactId = document.getElementById('contactId').value.trim();
+      if (!contactId) { showError('Enter a contact ID.'); return; }
+
+      const token = sessionToken;
+      setPending(true);
+      try {
+        const resp = await fetch('/admin/invites', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+          },
+          body: JSON.stringify({ contact_id: contactId }),
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text();
+          if (resp.status === 401 || resp.status === 403) {
+            showError('Access denied. Make sure you are signed in with an admin account.');
+          } else if (resp.status === 422) {
+            showError('Contact ID not found in lucos_contacts. Check the ID and try again.');
+          } else {
+            showError('Could not generate invite: ' + text.trim());
+          }
+          return;
+        }
+
+        const data = await resp.json();
+        urlEl.textContent = data.invite_url;
+        expiresEl.textContent = 'Expires: ' + new Date(data.expires_at).toLocaleString();
+        resultBox.hidden = false;
+      } catch (_) {
+        showError('Something went wrong. Try again.');
+      } finally {
+        setPending(false);
+      }
+    });
+
+    copyBtn.addEventListener('click', async function() {
+      const url = urlEl.textContent;
+      try {
+        await navigator.clipboard.writeText(url);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 2000);
+      } catch (_) {
+        // Fallback: select text for manual copy.
+        const range = document.createRange();
+        range.selectNode(urlEl);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+      }
+    });
+  </script>
+</body>
+</html>
