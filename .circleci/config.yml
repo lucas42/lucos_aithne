@@ -3,11 +3,27 @@ orbs:
   lucos: lucos/deploy@0
 
 jobs:
+  fetch-scopes:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Fetch canonical scopes.yaml from lucos_auth_scopes image
+          command: ./scripts/fetch-scopes.sh
+      - persist_to_workspace:
+          root: .
+          paths:
+            - scopes.yaml
+
   test:
     docker:
       - image: golang:1.26
     steps:
       - checkout
+      - attach_workspace:
+          at: .
       - run:
           name: Run tests
           command: go test ./...
@@ -16,7 +32,10 @@ workflows:
   version: 2
   build-deploy:
     jobs:
-      - test
+      - fetch-scopes
+      - test:
+          requires:
+            - fetch-scopes
       - lucos/build:
           serial-group: << pipeline.project.slug >>/build/<< pipeline.git.branch >>
       - lucos/deploy-avalon:
