@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -63,6 +64,7 @@ func (v *Vocabulary) All() []string {
 	for s := range v.valid {
 		result = append(result, s)
 	}
+	sort.Strings(result)
 	return result
 }
 

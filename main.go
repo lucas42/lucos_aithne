@@ -216,7 +216,6 @@ func grantToJSON(g *store.Grant) grantJSON {
 //	Authorization: Bearer <token>
 //
 // Returns 401 if no valid token is present and 403 if the scope is missing.
-// On success it injects the parsed SessionClaims via the request context.
 func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Extract Bearer token from Authorization header.
