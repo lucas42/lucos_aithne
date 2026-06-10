@@ -366,7 +366,11 @@ func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("Signing key rotated via admin endpoint — new key ID: %s", newKey.ID)
+		if claims, ok := r.Context().Value(claimsContextKey).(*token.SessionClaims); ok {
+			log.Printf("Signing key rotated via admin endpoint — initiated by %s, new key ID: %s", claims.Subject, newKey.ID)
+		} else {
+			log.Printf("Signing key rotated via admin endpoint — new key ID: %s (actor unknown)", newKey.ID)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
