@@ -100,6 +100,26 @@ Delivered as a cookie named `aithne_session`, scoped to `l42.eu` (covering all
 `*.l42.eu` subdomains), `Secure`, `HttpOnly`, `SameSite=None`. Consumers using
 browser-originated requests receive it automatically.
 
+### CSRF protection required for cookie-based state mutation
+
+Because the session cookie uses `SameSite=None`, it is sent on **all** cross-origin
+requests — including CSRF-triggered ones. `HttpOnly` protects against XSS reading the
+cookie value; it provides no CSRF protection.
+
+Consumers that expose write endpoints (POST / PUT / PATCH / DELETE) and authenticate
+via the cookie MUST add CSRF mitigation. Two common approaches:
+
+- **Custom request header**: require a header such as `X-Requested-With: XMLHttpRequest`
+  on state-mutating requests. Browsers do not automatically send custom headers on
+  cross-origin requests, so this distinguishes legitimate AJAX calls from CSRF-triggered
+  form submissions.
+- **`Origin` / `Referer` verification**: reject requests where the `Origin` or `Referer`
+  header does not match an expected `*.l42.eu` origin.
+
+Consumers that use the JWT as a `Bearer` token in the `Authorization` header (rather
+than relying on the cookie) are **not affected** — browsers do not automatically set
+`Authorization` headers on CSRF-triggered requests.
+
 ### Machine / agent sessions
 
 Obtained programmatically via the OAuth2 client-credentials endpoint (see the
