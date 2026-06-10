@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -118,12 +119,44 @@ func mintBearerToken(t *testing.T, s *store.Store, scopes []string) string {
 	return tok
 }
 
-// newAdminMux builds a test ServeMux with only the admin endpoints registered.
+// newAdminMux builds a test ServeMux with only the admin and enrolment endpoints registered.
 func newAdminMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, testIssuer, handleGrants(s, testMainVocab)))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
+	contacts := newContactsClient("http://contacts.test", "test-key")
+	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
 	return mux
+}
+
+// newContactsServer starts a test HTTP server that returns the given status and
+// body for all requests. Returns the server and its URL.
+func newContactsServer(t *testing.T, status int, body string) *http.ServeMux {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	})
+	return mux
+}
+
+// createValidInvite generates a raw token and stores an invite for contactID
+// (with the principal already created). Returns the raw token.
+func createValidInvite(t *testing.T, s *store.Store, contactID string) string {
+	t.Helper()
+	// Ensure the principal exists.
+	if _, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID); errors.Is(err, store.ErrNotFound) {
+		if _, err2 := s.CreatePrincipal(store.PrincipalClassHuman, contactID); err2 != nil {
+			t.Fatalf("createValidInvite: CreatePrincipal: %v", err2)
+		}
+	}
+	rawToken := "test-token-" + contactID
+	if _, err := s.CreateInvite(rawToken, contactID, "admin"); err != nil {
+		t.Fatalf("createValidInvite: CreateInvite: %v", err)
+	}
+	return rawToken
 }
 
 // --- parseScopesYAML tests ---
@@ -461,19 +494,6 @@ func TestJWKSEndpoint_Wired(t *testing.T) {
 	}
 }
 
-// --- registrationDisabled handler tests ---
-
-func TestRegistrationDisabled_Returns503(t *testing.T) {
-	for _, path := range []string{"/auth/register", "/auth/register/begin", "/auth/register/finish"} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rr := httptest.NewRecorder()
-		registrationDisabled(rr, req)
-		if rr.Code != http.StatusServiceUnavailable {
-			t.Errorf("registrationDisabled on %s: expected 503, got %d", path, rr.Code)
-		}
-	}
-}
-
 // --- Static file handler tests ---
 
 func TestServeStaticFile_LoginPage(t *testing.T) {
@@ -491,18 +511,6 @@ func TestServeStaticFile_LoginPage(t *testing.T) {
 	}
 }
 
-func TestServeStaticFile_RegisterPage(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/auth/register", nil)
-	rr := httptest.NewRecorder()
-	serveStaticFile(staticFS, "static/register.html")(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /auth/register: expected 200, got %d", rr.Code)
-	}
-	if !strings.Contains(rr.Body.String(), "<title>") {
-		t.Error("register.html body does not look like HTML (no <title>)")
-	}
-}
-
 func TestServeStaticFile_RejectsPost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", nil)
 	rr := httptest.NewRecorder()
@@ -516,12 +524,14 @@ func TestServeStaticFile_RejectsPost(t *testing.T) {
 //
 // Full ceremony happy-paths cannot be exercised in unit tests without a real
 // authenticator (hardware or software). Tests here cover:
-//   - Input validation (method, missing fields)
-//   - Ghost-principal and no-credentials paths (security rule #3)
-//   - Expired/missing ceremony session (begin not called, TTL exceeded)
-//   - handleRegisterBegin: returns valid PublicKeyCredentialCreationOptions
+//   - Input validation (method, missing token)
+//   - Invalid/expired/used invite paths
+//   - Ceremony session absent (begin not called, TTL exceeded)
+//   - handleEnrolBegin: returns valid PublicKeyCredentialCreationOptions
 
-func TestRegisterBegin_MissingContactID(t *testing.T) {
+// --- Enrolment begin tests ---
+
+func TestEnrolBegin_RejectsNonPost(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -530,36 +540,16 @@ func TestRegisterBegin_MissingContactID(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
-	body, _ := json.Marshal(map[string]string{})
-	req := httptest.NewRequest(http.MethodPost, "/auth/register/begin", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodGet, "/enrol/begin?token=any", nil)
 	rr := httptest.NewRecorder()
-	handleRegisterBegin(s, wa, cs)(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing contact_id, got %d", rr.Code)
-	}
-}
-
-func TestRegisterBegin_RejectsNonPost(t *testing.T) {
-	s, err := store.Open(":memory:")
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	defer s.Close()
-	wa := newTestWebAuthn(t)
-	cs := newCeremonyStore()
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/register/begin", nil)
-	rr := httptest.NewRecorder()
-	handleRegisterBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs)(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for GET, got %d", rr.Code)
 	}
 }
 
-func TestRegisterBegin_ReturnsOptions(t *testing.T) {
+func TestEnrolBegin_MissingToken(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -568,11 +558,47 @@ func TestRegisterBegin_ReturnsOptions(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
-	body, _ := json.Marshal(map[string]string{"contact_id": "alice", "label": "Test Key"})
-	req := httptest.NewRequest(http.MethodPost, "/auth/register/begin", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin", strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleRegisterBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs)(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing token, got %d", rr.Code)
+	}
+}
+
+func TestEnrolBegin_InvalidToken(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token=nonexistent", strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolBegin(s, wa, cs)(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid token, got %d", rr.Code)
+	}
+}
+
+func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	rawToken := createValidInvite(t, s, "alice")
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolBegin(s, wa, cs)(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
@@ -584,13 +610,16 @@ func TestRegisterBegin_ReturnsOptions(t *testing.T) {
 	if _, ok := opts["publicKey"]; !ok {
 		t.Error("response missing publicKey field")
 	}
-	// Verify session was stored in the ceremony store.
-	if _, ok := cs.take("register:alice"); !ok {
-		t.Error("ceremony store should hold session data after begin")
+	// Verify enrolment session was stored keyed by token hash.
+	tokenHash := store.HashToken(rawToken)
+	if _, _, ok := cs.takeEnrol(tokenHash); !ok {
+		t.Error("ceremony store should hold enrolment session data after begin")
 	}
 }
 
-func TestRegisterFinish_NoSession(t *testing.T) {
+func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
+	// Verifies that calling begin does not mark the invite as used —
+	// so a browser crash between begin and finish doesn't permanently burn it.
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -599,33 +628,287 @@ func TestRegisterFinish_NoSession(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
-	// No prior begin call — ceremony session is absent.
-	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish?contact_id=nobody", strings.NewReader("{}"))
-	req.Header.Set("Content-Type", "application/json")
+	rawToken := createValidInvite(t, s, "bob")
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
+	httptest.NewRecorder() // discard response
+	handleEnrolBegin(s, wa, cs)(httptest.NewRecorder(), req)
+
+	// Invite must still be valid after begin.
+	inv, err := s.GetInviteByRawToken(rawToken)
+	if err != nil {
+		t.Fatalf("invite should still be valid after begin: %v", err)
+	}
+	if inv.UsedAt != nil {
+		t.Error("invite should NOT be consumed after begin (only after successful finish)")
+	}
+}
+
+// --- Enrolment finish tests ---
+
+func TestEnrolFinish_RejectsNonPost(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	req := httptest.NewRequest(http.MethodGet, "/enrol/finish?token=any", nil)
 	rr := httptest.NewRecorder()
-	handleRegisterFinish(s, wa, cs)(rr, req)
+	handleEnrolFinish(s, wa, cs)(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET, got %d", rr.Code)
+	}
+}
+
+func TestEnrolFinish_MissingToken(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/finish", strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolFinish(s, wa, cs)(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing token, got %d", rr.Code)
+	}
+}
+
+func TestEnrolFinish_NoSession(t *testing.T) {
+	// begin was never called (or session expired).
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/finish?token=nonexistent", strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolFinish(s, wa, cs)(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for missing session, got %d", rr.Code)
 	}
 }
 
-func TestRegisterFinish_MissingContactIDParam(t *testing.T) {
+// --- Enrolment page tests ---
+
+func TestEnrolPage_RejectsNonGet(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
 	defer s.Close()
-	wa := newTestWebAuthn(t)
-	cs := newCeremonyStore()
+	contacts := newContactsClient("http://contacts.test", "test-key")
 
-	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish", strings.NewReader("{}"))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/enrol?token=x", nil)
 	rr := httptest.NewRecorder()
-	handleRegisterFinish(s, wa, cs)(rr, req)
+	handleEnrolPage(s, contacts)(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestEnrolPage_MissingToken(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	contacts := newContactsClient("http://contacts.test", "test-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/enrol", nil)
+	rr := httptest.NewRecorder()
+	handleEnrolPage(s, contacts)(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing contact_id param, got %d", rr.Code)
+		t.Errorf("expected 400 for missing token, got %d", rr.Code)
+	}
+}
+
+func TestEnrolPage_InvalidToken_RendersErrorPage(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	contacts := newContactsClient("http://contacts.test", "test-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/enrol?token=nonexistent", nil)
+	rr := httptest.NewRecorder()
+	handleEnrolPage(s, contacts)(rr, req)
+
+	// Should render the error template (200 with error HTML), not a raw HTTP error.
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 with error HTML, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "not valid") {
+		t.Errorf("error page should mention invite not valid, got: %s", body)
+	}
+}
+
+// --- Admin invites tests ---
+
+func TestAdminInvites_RejectsNoToken(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", strings.NewReader(`{"contact_id":"alice"}`))
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestAdminInvites_MissingContactID(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	body, _ := json.Marshal(map[string]string{})
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing contact_id, got %d", rr.Code)
+	}
+}
+
+// --- Store invite tests ---
+
+func TestStore_CreateAndGetInvite(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.CreatePrincipal(store.PrincipalClassHuman, "carol"); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	rawToken := "test-raw-token-abc"
+	inv, err := s.CreateInvite(rawToken, "carol", "admin")
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	if inv.ContactID != "carol" {
+		t.Errorf("ContactID: got %q, want %q", inv.ContactID, "carol")
+	}
+	if inv.UsedAt != nil {
+		t.Error("new invite should not be used")
+	}
+
+	// Retrieve by raw token — should succeed.
+	fetched, err := s.GetInviteByRawToken(rawToken)
+	if err != nil {
+		t.Fatalf("GetInviteByRawToken: %v", err)
+	}
+	if fetched.ContactID != "carol" {
+		t.Errorf("fetched ContactID: got %q", fetched.ContactID)
+	}
+
+	// Raw token is never stored — the TokenHash should be the SHA-256 hex.
+	if fetched.TokenHash == rawToken {
+		t.Error("TokenHash should be the SHA-256 hash, not the raw token itself")
+	}
+	if fetched.TokenHash != store.HashToken(rawToken) {
+		t.Errorf("TokenHash mismatch: got %q, want %q", fetched.TokenHash, store.HashToken(rawToken))
+	}
+}
+
+func TestStore_GetInvite_NotFound(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	_, err = s.GetInviteByRawToken("nonexistent-token")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestStore_ReplaceWebAuthnCredentialAndConsumeInvite_AtomicWipe(t *testing.T) {
+	// Verifies the atomic transaction: old creds are wiped, new one inserted, invite consumed.
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "dave")
+	if err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	// Insert an existing credential to be wiped.
+	if _, err := s.CreateCredential(p.ID, store.CredentialTypeWebAuthn, []byte(`{"old":true}`), "old-key"); err != nil {
+		t.Fatalf("CreateCredential (old): %v", err)
+	}
+
+	rawToken := "dave-invite-token"
+	if _, err := s.CreateInvite(rawToken, "dave", "admin"); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	// Execute the atomic replacement.
+	newCred, err := s.ReplaceWebAuthnCredentialAndConsumeInvite(p.ID, rawToken, []byte(`{"new":true}`), "new-key")
+	if err != nil {
+		t.Fatalf("ReplaceWebAuthnCredentialAndConsumeInvite: %v", err)
+	}
+	if newCred.Label != "new-key" {
+		t.Errorf("new credential label: got %q, want %q", newCred.Label, "new-key")
+	}
+
+	// Old credential must be gone; only the new one should exist.
+	creds, err := s.ListCredentialsByPrincipal(p.ID)
+	if err != nil {
+		t.Fatalf("ListCredentialsByPrincipal: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Errorf("expected exactly 1 credential after replace, got %d", len(creds))
+	}
+	if string(creds[0].Data) != `{"new":true}` {
+		t.Errorf("surviving credential has wrong data: %s", creds[0].Data)
+	}
+
+	// Invite must now be marked used.
+	inv, err := s.GetInviteByRawToken(rawToken)
+	if err == nil {
+		// GetInviteByRawToken returns ErrInviteUsed for a used invite, with the record.
+		t.Logf("invite returned with UsedAt: %v", inv.UsedAt)
+	}
+	if !errors.Is(err, store.ErrInviteUsed) {
+		t.Errorf("invite should be ErrInviteUsed after replace, got %v (inv=%v)", err, inv)
 	}
 }
 

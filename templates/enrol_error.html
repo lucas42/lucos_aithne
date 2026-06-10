@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invite link invalid — lucOS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a1a;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: .75rem; }
+    p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
+    a {
+      color: #0066cc;
+      text-decoration: none;
+      font-size: .875rem;
+    }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>lucOS</h1>
+    {{if eq .Reason "not_found"}}
+    <p>This invite link is not valid. Check the link and try again, or ask the administrator to send a new one.</p>
+    {{else if eq .Reason "expired"}}
+    <p>This invite link has expired. Please ask the administrator to send a new one.</p>
+    {{else if eq .Reason "used"}}
+    <p>This invite link has already been used to set up a passkey. If you need to replace your passkey, ask the administrator to send a new invite.</p>
+    {{else}}
+    <p>This invite link is not valid.</p>
+    {{end}}
+    <a href="/auth/login">← Back to sign in</a>
+  </div>
+</body>
+</html>

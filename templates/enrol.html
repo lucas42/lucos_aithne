@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Register passkey — lucOS</title>
+  <title>{{if .IsRecovery}}Create a new passkey{{else}}Set up your passkey{{end}} — lucOS</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -69,36 +69,56 @@
       margin-top: -.75rem;
       margin-bottom: 1rem;
     }
-    .signin-link {
+    .success {
       text-align: center;
-      margin-top: 1.25rem;
-      font-size: .875rem;
-      color: #555;
+      margin-top: .5rem;
     }
-    .signin-link a { color: #0066cc; text-decoration: none; }
-    .signin-link a:hover { text-decoration: underline; }
+    .success p { color: #555; font-size: .875rem; margin-bottom: 1rem; }
+    .success a {
+      display: inline-block;
+      padding: .625rem 1.5rem;
+      background: #0066cc;
+      color: #fff;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: .9rem;
+    }
+    .success a:hover { background: #0052a3; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>lucOS</h1>
-    <p class="subtitle">Register a new passkey</p>
-    <form id="registerForm" novalidate>
-      <label for="contactId">Contact ID</label>
-      <input type="text" id="contactId" name="contact_id"
-             placeholder="e.g. lucas" autocomplete="username" required>
+    {{if .IsRecovery}}
+    <p class="subtitle">Create a new passkey for <strong>{{.DisplayName}}</strong>.</p>
+    {{else}}
+    <p class="subtitle">Set up access for <strong>{{.DisplayName}}</strong>.</p>
+    {{end}}
+
+    <form id="enrolForm" novalidate>
       <label for="label">Passkey name</label>
       <input type="text" id="label" name="label"
              placeholder="e.g. MacBook Touch ID" autocomplete="off"
              aria-describedby="labelHint">
       <p class="hint" id="labelHint">Give this passkey a name so you can identify it later.</p>
-      <button type="submit" id="submitBtn">Register passkey</button>
+      {{if .IsRecovery}}
+      <button type="submit" id="submitBtn">Create new passkey</button>
+      {{else}}
+      <button type="submit" id="submitBtn">Set up passkey</button>
+      {{end}}
     </form>
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
-    <p class="signin-link">Already have a passkey? <a href="/auth/login">Sign in</a></p>
+    <div class="success" id="successBox" hidden>
+      <p>Your passkey is set up.</p>
+      <a href="/auth/login">Sign in →</a>
+    </div>
   </div>
 
   <script>
+    // Invite token embedded by the server — never read from client URL params.
+    const inviteToken = {{.Token | js}};
+
     function b64urlToBytes(b64url) {
       let b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
       while (b64.length % 4) b64 += '=';
@@ -115,7 +135,6 @@
       return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
 
-    // Convert server's base64url challenge/user.id to ArrayBuffers.
     function decodeCredentialCreationOptions(opts) {
       const pk = opts.publicKey;
       if (pk.challenge) pk.challenge = b64urlToBytes(pk.challenge);
@@ -129,7 +148,6 @@
       return pk;
     }
 
-    // Encode a new PublicKeyCredential for sending to the server.
     function encodeAttestation(cred) {
       const resp = cred.response;
       return {
@@ -144,13 +162,15 @@
       };
     }
 
-    const errorBox = document.getElementById('errorBox');
-    const btn      = document.getElementById('submitBtn');
+    const errorBox   = document.getElementById('errorBox');
+    const successBox = document.getElementById('successBox');
+    const form       = document.getElementById('enrolForm');
+    const btn        = document.getElementById('submitBtn');
 
     function showError(msg) {
       errorBox.textContent = msg;
       errorBox.hidden = false;
-      errorBox.focus(); // moves focus to the error so keyboard / screen-reader users are notified
+      errorBox.focus();
     }
 
     function clearError() {
@@ -160,33 +180,35 @@
 
     function setPending(yes) {
       btn.setAttribute('aria-disabled', yes ? 'true' : 'false');
-      btn.textContent = yes ? 'Creating passkey…' : 'Register passkey';
+      btn.textContent = yes ? 'Creating passkey…' : btn.dataset.label;
     }
 
-    document.getElementById('registerForm').addEventListener('submit', async function(e) {
+    btn.dataset.label = btn.textContent;
+
+    form.addEventListener('submit', async function(e) {
       e.preventDefault();
       clearError();
-
-      const contactId = document.getElementById('contactId').value.trim();
       const label = document.getElementById('label').value.trim();
-      if (!contactId) { showError('Enter your contact ID.'); return; }
-
       setPending(true);
 
       try {
-        // Step 1: get registration options from server.
-        const beginResp = await fetch('/auth/register/begin', {
+        // Step 1: get registration options (validates invite, does not consume).
+        const beginResp = await fetch('/enrol/begin?token=' + encodeURIComponent(inviteToken), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contact_id: contactId, label }),
+          body: '{}',
         });
         if (!beginResp.ok) {
-          showError('Could not start registration. Try again, or come back later.');
+          if (beginResp.status === 401) {
+            showError('This invite link is no longer valid. Please ask the administrator to send a new one.');
+          } else {
+            showError('Could not start registration. Try again, or contact the administrator.');
+          }
           return;
         }
         const publicKey = decodeCredentialCreationOptions(await beginResp.json());
 
-        // Step 2: invoke the browser passkey registration prompt.
+        // Step 2: invoke the browser passkey prompt.
         let attestation;
         try {
           attestation = await navigator.credentials.create({ publicKey });
@@ -201,12 +223,9 @@
           return;
         }
 
-        // Step 3: send the new credential to the server.
-        const params = new URLSearchParams({
-          contact_id: contactId,
-          label: label || 'passkey',
-        });
-        const finishResp = await fetch('/auth/register/finish?' + params, {
+        // Step 3: finish registration (atomic wipe + register + consume invite).
+        const params = new URLSearchParams({ token: inviteToken, label: label || 'passkey' });
+        const finishResp = await fetch('/enrol/finish?' + params, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(encodeAttestation(attestation)),
@@ -216,8 +235,9 @@
           return;
         }
 
-        // Success — go to login page.
-        window.location.href = '/auth/login';
+        // Success — hide form, show confirmation with sign-in link.
+        form.hidden = true;
+        successBox.hidden = false;
       } catch (_) {
         showError('Something went wrong. Try again, or come back later.');
       } finally {

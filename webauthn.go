@@ -56,6 +56,7 @@ const challengeTTL = 60 * time.Second
 type ceremonyStore struct {
 	mu      sync.Mutex
 	entries map[string]*ceremonyEntry
+	enrol   map[string]*enrolCeremonyEntry
 }
 
 type ceremonyEntry struct {
@@ -63,8 +64,20 @@ type ceremonyEntry struct {
 	expiresAt time.Time
 }
 
+// enrolCeremonyEntry holds session data for the invite-gated enrolment flow.
+// It carries the contactID from the invite so that /enrol/finish can derive it
+// server-side rather than trusting a client-supplied parameter.
+type enrolCeremonyEntry struct {
+	data      *gwebauthn.SessionData
+	contactID string
+	expiresAt time.Time
+}
+
 func newCeremonyStore() *ceremonyStore {
-	return &ceremonyStore{entries: make(map[string]*ceremonyEntry)}
+	return &ceremonyStore{
+		entries: make(map[string]*ceremonyEntry),
+		enrol:   make(map[string]*enrolCeremonyEntry),
+	}
 }
 
 // put stores session data under key. Overwrites any prior entry (new begin
@@ -96,6 +109,42 @@ func (cs *ceremonyStore) take(key string) (*gwebauthn.SessionData, bool) {
 		return nil, false
 	}
 	return e.data, true
+}
+
+// putEnrol stores an enrolment ceremony session keyed by tokenHash.
+// contactID is the contact the invite was issued for; it is retrieved at
+// finish time so the server never trusts a client-supplied contact_id.
+func (cs *ceremonyStore) putEnrol(tokenHash string, data *gwebauthn.SessionData, contactID string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.enrol[tokenHash] = &enrolCeremonyEntry{
+		data:      data,
+		contactID: contactID,
+		expiresAt: time.Now().Add(challengeTTL),
+	}
+	// Opportunistic cleanup.
+	now := time.Now()
+	for k, e := range cs.enrol {
+		if now.After(e.expiresAt) {
+			delete(cs.enrol, k)
+		}
+	}
+}
+
+// takeEnrol retrieves and deletes an enrolment ceremony session (one-time use).
+// Returns (nil, "", false) if the key does not exist or has expired.
+func (cs *ceremonyStore) takeEnrol(tokenHash string) (*gwebauthn.SessionData, string, bool) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	e, ok := cs.enrol[tokenHash]
+	if !ok {
+		return nil, "", false
+	}
+	delete(cs.enrol, tokenHash)
+	if time.Now().After(e.expiresAt) {
+		return nil, "", false
+	}
+	return e.data, e.contactID, true
 }
 
 // --- webAuthnUser wraps store.Principal + credentials for the library ---
@@ -144,152 +193,6 @@ func loadWebAuthnUserByPrincipal(s *store.Store, p *store.Principal) (*webAuthnU
 		webCreds = append(webCreds, *wc)
 	}
 	return &webAuthnUser{principal: p, credentials: webCreds}, nil
-}
-
-// --- Registration ceremony ---
-
-type registerBeginRequest struct {
-	ContactID string `json:"contact_id"`
-	Label     string `json:"label"` // human-readable device label, e.g. "MacBook Touch ID"
-}
-
-func handleRegisterBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req registerBeginRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "400 Bad Request — invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if req.ContactID == "" {
-			http.Error(w, "400 Bad Request — contact_id is required", http.StatusBadRequest)
-			return
-		}
-
-		// Get or create the human principal for this contact ID.
-		p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, req.ContactID)
-		if errors.Is(err, store.ErrNotFound) {
-			p, err = s.CreatePrincipal(store.PrincipalClassHuman, req.ContactID)
-			if err != nil {
-				log.Printf("register/begin: create principal %q: %v", req.ContactID, err)
-				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-				return
-			}
-		} else if err != nil {
-			log.Printf("register/begin: lookup principal %q: %v", req.ContactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		// Load all existing credentials to exclude them from the new registration
-		// (prevents registering the same authenticator twice).
-		existingCreds, err := s.ListCredentialsByPrincipal(p.ID)
-		if err != nil {
-			log.Printf("register/begin: list credentials %q: %v", req.ContactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-		var excludeList []gwebauthn.Credential
-		for _, c := range existingCreds {
-			if c.Type != store.CredentialTypeWebAuthn {
-				continue
-			}
-			wc, err := store.UnmarshalWebAuthnCredential(c.Data)
-			if err != nil {
-				continue
-			}
-			excludeList = append(excludeList, *wc)
-		}
-		user := &webAuthnUser{principal: p, credentials: excludeList}
-
-		creation, sessionData, err := wa.BeginRegistration(user)
-		if err != nil {
-			log.Printf("register/begin: BeginRegistration %q: %v", req.ContactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		// Stash session data; key = "register:<contactID>" for one-time take.
-		cs.put("register:"+req.ContactID, sessionData)
-
-		// Return the options JSON to the browser.
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(creation); err != nil {
-			log.Printf("register/begin: encode options: %v", err)
-		}
-	}
-}
-
-type registerFinishRequest struct {
-	ContactID string `json:"contact_id"`
-	Label     string `json:"label"` // stored as credentials.label
-}
-
-func handleRegisterFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// The contact_id and label are passed as query parameters so the body
-		// can carry the raw WebAuthn credential JSON as expected by the library.
-		contactID := r.URL.Query().Get("contact_id")
-		label := r.URL.Query().Get("label")
-		if contactID == "" {
-			http.Error(w, "400 Bad Request — contact_id query param required", http.StatusBadRequest)
-			return
-		}
-
-		sessionData, ok := cs.take("register:" + contactID)
-		if !ok {
-			http.Error(w, "400 Bad Request — no pending registration (expired or not started)", http.StatusBadRequest)
-			return
-		}
-
-		p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
-		if errors.Is(err, store.ErrNotFound) {
-			http.Error(w, "404 Not Found — principal not found (register/begin not called?)", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			log.Printf("register/finish: lookup principal %q: %v", contactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-		user := &webAuthnUser{principal: p}
-
-		credential, err := wa.FinishRegistration(user, *sessionData, r)
-		if err != nil {
-			log.Printf("register/finish: FinishRegistration %q: %v", contactID, err)
-			http.Error(w, "400 Bad Request — registration verification failed", http.StatusBadRequest)
-			return
-		}
-
-		// Validate + serialise credential data before storing (security rule #2).
-		data, err := store.MarshalWebAuthnCredential(credential)
-		if err != nil {
-			log.Printf("register/finish: marshal credential: %v", err)
-			http.Error(w, "400 Bad Request — invalid credential structure", http.StatusBadRequest)
-			return
-		}
-
-		if label == "" {
-			label = "passkey"
-		}
-		if _, err := s.CreateCredential(p.ID, store.CredentialTypeWebAuthn, data, label); err != nil {
-			log.Printf("register/finish: store credential %q: %v", contactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
-	}
 }
 
 // --- Authentication ceremony ---
