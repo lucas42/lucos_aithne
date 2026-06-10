@@ -1,0 +1,11 @@
+# lucOS authorisation scope vocabulary (local copy for development and testing).
+# The canonical vocabulary is published by lucas42/lucos_auth_scopes.
+# The Dockerfile replaces this file at build time via:
+#   COPY --from=lucas42/lucos_auth_scopes:1.0.3 /scopes.yaml ./
+# Keep this file in sync with the canonical vocabulary when updating.
+#
+# See ADR-0001 §7 for design rationale (build-time coupling, no runtime polling).
+
+scopes:
+  - render-ui    # dev-only: GET-render any service's UI (e.g. lucos-ux page snapshots)
+  - aithne:admin # full admin surface: scope-grant authority + account enrolment/recovery

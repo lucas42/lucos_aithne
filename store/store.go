@@ -148,6 +148,24 @@ func (s *Store) migrate() error {
 			created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
 			retired_at  DATETIME
 		)`,
+		// grants is the default-deny scope-grant store per ADR-0001 §6.
+		// A row means "principal_id has scope in environment". No row = no access.
+		// Revocation sets revoked_by/revoked_at; revoked rows are kept for audit.
+		`CREATE TABLE IF NOT EXISTS grants (
+			id           TEXT PRIMARY KEY,
+			principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+			scope        TEXT NOT NULL,
+			environment  TEXT NOT NULL,
+			granted_by   TEXT NOT NULL,
+			granted_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+			revoked_by   TEXT,
+			revoked_at   DATETIME
+		)`,
+		// Partial unique index: prevents duplicate *active* grants.
+		// Revoked rows (revoked_at IS NOT NULL) are excluded so a revoked grant
+		// can be re-granted.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_active
+		 ON grants(principal_id, scope, environment) WHERE revoked_at IS NULL`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
