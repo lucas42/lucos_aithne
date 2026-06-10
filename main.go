@@ -35,11 +35,12 @@ const (
 )
 
 // scopes.yaml is embedded at build time.
-// In Docker CI builds the Dockerfile replaces this with the canonical
-// vocabulary from lucas42/lucos_auth_scopes:v1.0.3. The local copy (in
-// the repository) mirrors that vocabulary and is used for development and
-// tests.
+// The file is NOT committed — run scripts/fetch-scopes.sh (or `go generate ./...`)
+// to populate it locally before building or testing.
+// In CI the fetch-scopes job writes scopes.yaml to the workspace before `go test`;
+// the Dockerfile fetches it independently via the `COPY --from=scopes` instruction.
 //
+//go:generate ./scripts/fetch-scopes.sh
 //go:embed scopes.yaml
 var scopesYAML []byte
 
