@@ -320,6 +320,24 @@ func (s *Store) ListCredentialsByPrincipal(principalID string) ([]*Credential, e
 	return collectCredentials(rows)
 }
 
+// UpdateCredentialData replaces the data BLOB for an existing credential.
+// Used after a successful WebAuthn authentication to persist the updated sign count.
+// Returns ErrNotFound if no such credential exists.
+func (s *Store) UpdateCredentialData(id string, data []byte) error {
+	res, err := s.db.Exec(`UPDATE credentials SET data = ? WHERE id = ?`, data, id)
+	if err != nil {
+		return fmt.Errorf("store: update credential data: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update credential data rows-affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteCredential removes a single credential by ID.
 // Returns ErrNotFound if no such credential exists.
 func (s *Store) DeleteCredential(id string) error {

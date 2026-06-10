@@ -6,11 +6,12 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	gwebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"lucos_aithne/store"
 	"lucos_aithne/token"
 )
@@ -36,6 +38,12 @@ const claimsContextKey contextKey = iota
 //
 //go:embed scopes.yaml
 var scopesYAML []byte
+
+// staticFS embeds the static/ directory so the HTML login/registration pages
+// are served by the single binary (required for the scratch runtime image).
+//
+//go:embed static
+var staticFS embed.FS
 
 const healthcheckTimeout = 5 * time.Second
 
@@ -404,6 +412,18 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 	}
 }
 
+// serveStaticFile returns an http.HandlerFunc that serves a single embedded
+// file from staticFS at the given path (e.g. "static/login.html").
+func serveStaticFile(fsys fs.FS, path string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		http.ServeFileFS(w, r, fsys, path)
+	}
+}
+
 func main() {
 	port := getEnvRequired("PORT")
 
@@ -447,11 +467,35 @@ func main() {
 		bootstrapAdmin(s, adminContactID, environment, vocab)
 	}
 
+	// Initialise the WebAuthn relying party.
+	// RP ID = l42.eu (registrable parent domain per ADR-0001 §2): passkeys
+	// registered here are valid on any service under *.l42.eu, so moving the
+	// login origin to a different subdomain does not invalidate existing keys.
+	wa, err := gwebauthn.New(&gwebauthn.Config{
+		RPID:          "l42.eu",
+		RPDisplayName: "lucOS",
+		RPOrigins:     []string{issuer},
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialise WebAuthn relying party: %v", err)
+	}
+	cs := newCeremonyStore()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_info", handleInfo(system, s))
 	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
 		return s.ListVerificationKeys(token.VerificationWindow)
 	}))
+
+	// Passkey login/registration pages (HTML).
+	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
+	mux.HandleFunc("/auth/register", serveStaticFile(staticFS, "static/register.html"))
+
+	// WebAuthn ceremony endpoints (JSON API, consumed by the HTML pages above).
+	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
+	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
+	mux.HandleFunc("/auth/register/begin", handleRegisterBegin(s, wa, cs))
+	mux.HandleFunc("/auth/register/finish", handleRegisterFinish(s, wa, cs))
 
 	// Admin grant-management surface (all gated on aithne:admin scope).
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))

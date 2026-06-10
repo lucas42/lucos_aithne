@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — lucOS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a1a;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+      width: 100%;
+      max-width: 360px;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    .subtitle { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
+    label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .375rem; }
+    input[type="text"] {
+      display: block;
+      width: 100%;
+      padding: .5rem .75rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      outline: none;
+      transition: border-color .15s;
+      margin-bottom: 1rem;
+    }
+    input[type="text"]:focus { border-color: #0066cc; }
+    button {
+      display: block;
+      width: 100%;
+      padding: .625rem;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #0066cc;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    button:hover { background: #0052a3; }
+    button[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events: none; }
+    .error {
+      background: #fff0f0;
+      border: 1px solid #f5c6cb;
+      border-radius: 6px;
+      padding: .625rem .75rem;
+      font-size: .875rem;
+      color: #c00;
+      margin-top: .75rem;
+    }
+    .error[hidden] { display: none; }
+    .register-link {
+      text-align: center;
+      margin-top: 1.25rem;
+      font-size: .875rem;
+      color: #555;
+    }
+    .register-link a { color: #0066cc; text-decoration: none; }
+    .register-link a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>lucOS</h1>
+    <p class="subtitle">Sign in with your passkey</p>
+    <form id="loginForm" novalidate>
+      <label for="contactId">Contact ID</label>
+      <input type="text" id="contactId" name="contact_id"
+             placeholder="e.g. lucas" autocomplete="username webauthn" required>
+      <button type="submit" id="submitBtn">Sign in with passkey</button>
+    </form>
+    <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
+    <p class="register-link">No passkey yet? <a href="/auth/register">Register one</a></p>
+  </div>
+
+  <script>
+    // ── Base64url helpers ──────────────────────────────────────────────────────
+
+    function b64urlToBytes(b64url) {
+      let b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    function bytesToB64url(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let bin = '';
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    // ── Options / assertion helpers ────────────────────────────────────────────
+
+    // Convert server's base64url challenge and allowCredentials ids to ArrayBuffers.
+    function decodeCredentialRequestOptions(opts) {
+      if (opts.publicKey.challenge) {
+        opts.publicKey.challenge = b64urlToBytes(opts.publicKey.challenge);
+      }
+      if (opts.publicKey.allowCredentials) {
+        opts.publicKey.allowCredentials = opts.publicKey.allowCredentials.map(c => ({
+          ...c,
+          id: b64urlToBytes(c.id),
+        }));
+      }
+      return opts.publicKey;
+    }
+
+    // Encode a PublicKeyCredential assertion for the server.
+    function encodeAssertion(cred) {
+      const resp = cred.response;
+      return {
+        id: cred.id,
+        rawId: bytesToB64url(cred.rawId),
+        type: cred.type,
+        response: {
+          authenticatorData: bytesToB64url(resp.authenticatorData),
+          clientDataJSON:    bytesToB64url(resp.clientDataJSON),
+          signature:         bytesToB64url(resp.signature),
+          userHandle:        resp.userHandle ? bytesToB64url(resp.userHandle) : null,
+        },
+      };
+    }
+
+    // ── UI helpers ─────────────────────────────────────────────────────────────
+
+    const errorBox = document.getElementById('errorBox');
+    const btn      = document.getElementById('submitBtn');
+
+    function showError(msg) {
+      errorBox.textContent = msg;
+      errorBox.hidden = false;
+      errorBox.focus(); // moves focus to the error so keyboard / screen-reader users are notified
+    }
+
+    function clearError() {
+      errorBox.hidden = true;
+      errorBox.textContent = '';
+    }
+
+    function setPending(yes) {
+      // aria-disabled keeps the button in the tab order (unlike `disabled`).
+      btn.setAttribute('aria-disabled', yes ? 'true' : 'false');
+      btn.textContent = yes ? 'Waiting for passkey…' : 'Sign in with passkey';
+    }
+
+    // Redirect to ?next= only if it is a same-origin path.
+    function safeRedirect() {
+      const next = new URLSearchParams(window.location.search).get('next');
+      if (next) {
+        try {
+          const url = new URL(next, window.location.origin);
+          if (url.origin === window.location.origin) {
+            window.location.href = url.href;
+            return;
+          }
+        } catch (_) {}
+      }
+      window.location.href = '/';
+    }
+
+    // ── Core authentication flow ───────────────────────────────────────────────
+
+    async function authenticate(contactId) {
+      clearError();
+      setPending(true);
+
+      try {
+        const beginResp = await fetch('/auth/login/begin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contact_id: contactId }),
+        });
+        if (!beginResp.ok) {
+          if (beginResp.status === 404) {
+            showError('No passkey registered for this contact ID. Check the ID and try again.');
+          } else {
+            showError('Could not start sign-in. Try again, or come back later.');
+          }
+          return;
+        }
+
+        const publicKey = decodeCredentialRequestOptions(await beginResp.json());
+        let assertion;
+        try {
+          assertion = await navigator.credentials.get({ publicKey });
+        } catch (err) {
+          if (err.name === 'NotAllowedError') {
+            showError('Sign-in cancelled. Try again when you\'re ready.');
+          } else {
+            showError('Couldn\'t get passkey. Try a different device, or try again.');
+          }
+          return;
+        }
+
+        const finishResp = await fetch('/auth/login/finish?contact_id=' + encodeURIComponent(contactId), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(encodeAssertion(assertion)),
+        });
+        if (!finishResp.ok) {
+          if (finishResp.status === 403) {
+            showError('Sign-in refused for security reasons. Contact the administrator if this is unexpected.');
+          } else {
+            showError('Passkey verification failed. Try a different device, or try again.');
+          }
+          return;
+        }
+
+        safeRedirect();
+      } catch (_) {
+        showError('Something went wrong. Try again, or come back later.');
+      } finally {
+        setPending(false);
+      }
+    }
+
+    // ── Conditional mediation (passkey autofill) ───────────────────────────────
+    //
+    // Modern browsers (Chrome 108+, Safari 16+, Firefox 119+) will show passkey
+    // suggestions in the autofill dropdown when the contact-ID input is focused,
+    // driven by autocomplete="username webauthn" on the input element.
+    // The conditional request must be started before the user interacts.
+    //
+    // NOTE: this requires the server to accept an empty contact_id on
+    // /auth/login/begin (returning allowCredentials:[]) and to identify the
+    // principal from the userHandle in the assertion on /auth/login/finish
+    // rather than from the contact_id query param. Until that backend change
+    // lands, startConditional() silently does nothing if /begin returns 400.
+
+    let conditionalAbort = null;
+
+    async function startConditional() {
+      if (
+        !window.PublicKeyCredential ||
+        typeof PublicKeyCredential.isConditionalMediationAvailable !== 'function'
+      ) return;
+      const available = await PublicKeyCredential.isConditionalMediationAvailable().catch(() => false);
+      if (!available) return;
+
+      conditionalAbort = new AbortController();
+      try {
+        const beginResp = await fetch('/auth/login/begin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contact_id: '' }),
+          signal: conditionalAbort.signal,
+        });
+        if (!beginResp.ok) return; // silently skip if server rejects empty contact_id
+
+        const data = await beginResp.json();
+        const sessionId = data.aithne_session; // server-issued token to correlate begin/finish
+        const publicKey = decodeCredentialRequestOptions(data);
+        const assertion = await navigator.credentials.get({
+          publicKey,
+          mediation: 'conditional',
+          signal: conditionalAbort.signal,
+        });
+
+        // Pass the session token so the server can match the begin session and
+        // identify the principal from the assertion's userHandle.
+        const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
+        const finishResp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(encodeAssertion(assertion)),
+        });
+        if (finishResp.ok) safeRedirect();
+        else showError('Sign-in failed. Try entering your contact ID and clicking the button.');
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          // Conditional failures are silent — user can still use the button path.
+        }
+      }
+    }
+
+    // ── Event binding ──────────────────────────────────────────────────────────
+
+    document.getElementById('loginForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      if (conditionalAbort) { conditionalAbort.abort(); conditionalAbort = null; }
+
+      const contactId = document.getElementById('contactId').value.trim();
+      if (!contactId) { showError('Enter your contact ID.'); return; }
+
+      await authenticate(contactId);
+    });
+
+    startConditional();
+  </script>
+</body>
+</html>
