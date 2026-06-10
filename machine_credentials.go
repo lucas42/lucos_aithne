@@ -1,0 +1,264 @@
+package main
+
+// Machine/agent authentication via OAuth2 client-credentials (lucos_aithne#8).
+//
+// Per ADR-0001 §5, non-human principals (AI agents) authenticate non-interactively
+// via the OAuth2 client-credentials grant. The long-lived machine key lives in
+// lucos_creds (per-env, rotatable); it is exchanged at runtime for a short-lived
+// signed JWT. The session is never stored in creds — so there is no runtime creds
+// dependency on the hot path.
+//
+// The machine key format used here is a shared-secret bearer credential:
+//   - client_id  = agent slug (externally meaningful identity, per ADR §4)
+//   - client_secret = raw high-entropy string (UUID v4 — no special characters,
+//     compatible with lucos_creds storage)
+//
+// Only the SHA-256 hash of the raw secret is stored in the credential data BLOB
+// (same pattern as enrolment invite tokens — the raw secret is returned once at
+// provisioning time and never persisted in the DB).
+//
+// Endpoints:
+//   POST /oauth2/token           — client-credentials grant (RFC 6749)
+//   POST /admin/machine-keys     — provision a new machine key (aithne:admin)
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+
+	"lucos_aithne/store"
+	"lucos_aithne/token"
+)
+
+// machineKeyHashLen is the expected byte-length of the data BLOB for a
+// machine_key credential: 64 hex characters = 32 bytes SHA-256 digest.
+const machineKeyHashLen = 64
+
+// hashMachineKey returns the hex-encoded SHA-256 of the raw secret.
+// This is the value stored in credentials.data for machine_key credentials.
+func hashMachineKey(rawSecret string) string {
+	sum := sha256.Sum256([]byte(rawSecret))
+	return hex.EncodeToString(sum[:])
+}
+
+// --- OAuth2 token endpoint ---
+
+// tokenSuccessResponse is the RFC 6749 §5.1 success payload.
+type tokenSuccessResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+}
+
+// tokenErrorResponse is the RFC 6749 §5.2 error payload.
+type tokenErrorResponse struct {
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description,omitempty"`
+}
+
+// writeTokenError writes an RFC 6749 §5.2 JSON error response.
+// status should be 400 (invalid_request, unsupported_grant_type) or
+// 401 (invalid_client). For 401, WWW-Authenticate is required by the spec.
+func writeTokenError(w http.ResponseWriter, status int, errCode, description string) {
+	if status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="aithne"`)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(tokenErrorResponse{
+		Error:            errCode,
+		ErrorDescription: description,
+	})
+}
+
+// handleClientCredentials serves POST /oauth2/token.
+// It implements the OAuth2 client-credentials grant (RFC 6749 §4.4) for
+// agent principals holding a machine_key credential.
+func handleClientCredentials(s *store.Store, issuer, environment string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if err := r.ParseForm(); err != nil {
+			writeTokenError(w, http.StatusBadRequest, "invalid_request", "could not parse form body")
+			return
+		}
+
+		grantType := r.FormValue("grant_type")
+		if grantType != "client_credentials" {
+			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
+				fmt.Sprintf("unsupported grant_type %q; only client_credentials is supported", grantType))
+			return
+		}
+
+		clientID := r.FormValue("client_id")
+		clientSecret := r.FormValue("client_secret")
+		if clientID == "" || clientSecret == "" {
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+				"client_id and client_secret are required")
+			return
+		}
+
+		// Look up the agent principal by slug. Call GetPrincipalByExternalID first
+		// to distinguish "unknown client" from "no machine_key credential" — both
+		// return invalid_client to the caller (no information leak) but the
+		// distinction avoids the ghost-principal ambiguity noted by lucos-security.
+		principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, clientID)
+		if err != nil {
+			// ErrNotFound or any other error: do not reveal which case it is.
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+				"invalid client_id or client_secret")
+			return
+		}
+
+		// List machine_key credentials and look for a hash match.
+		creds, err := s.ListCredentialsByPrincipal(principal.ID)
+		if err != nil {
+			log.Printf("handleClientCredentials: list credentials for %s: %v", principal.ID, err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+
+		secretHash := hashMachineKey(clientSecret)
+		var matched bool
+		for _, c := range creds {
+			if c.Type != store.CredentialTypeMachineKey {
+				continue
+			}
+			if string(c.Data) == secretHash {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+				"invalid client_id or client_secret")
+			return
+		}
+
+		// Collect active scopes for this principal in the current environment.
+		scopes, err := s.GetActiveScopes(principal.ID, environment)
+		if err != nil {
+			log.Printf("handleClientCredentials: get scopes for %s: %v", principal.ID, err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+
+		// Obtain the active signing key.
+		signingKey, err := s.GetOrCreateActiveSigningKey()
+		if err != nil {
+			log.Printf("handleClientCredentials: get signing key: %v", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+
+		// Mint a short-lived session JWT — identical format to the human login path.
+		tokenStr, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
+		if err != nil {
+			log.Printf("handleClientCredentials: mint session: %v", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(tokenSuccessResponse{
+			AccessToken: tokenStr,
+			TokenType:   "Bearer",
+			ExpiresIn:   int(token.DefaultSessionTTL.Seconds()),
+		})
+	}
+}
+
+// --- Admin machine-key provisioning endpoint ---
+
+type createMachineKeyRequest struct {
+	AgentSlug string `json:"agent_slug"`
+}
+
+type createMachineKeyResponse struct {
+	ClientID     string    `json:"client_id"`
+	ClientSecret string    `json:"client_secret"`
+	CredentialID string    `json:"credential_id"`
+	CreatedAt    time.Time `json:"created_at"`
+	Note         string    `json:"note"`
+}
+
+// handleAdminMachineKeys serves POST /admin/machine-keys.
+// It provisions a new machine_key credential for an agent principal.
+// The raw secret is returned once — only its SHA-256 hash is stored in the DB.
+// Callers must save the secret immediately to lucos_creds.
+func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req createMachineKeyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "400 Bad Request: invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if req.AgentSlug == "" {
+			http.Error(w, "400 Bad Request: agent_slug is required", http.StatusBadRequest)
+			return
+		}
+
+		// Find or create the agent principal.
+		principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, req.AgentSlug)
+		if err != nil {
+			if err != store.ErrNotFound {
+				log.Printf("handleAdminMachineKeys: get principal %q: %v", req.AgentSlug, err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			// Principal doesn't exist — create it.
+			principal, err = s.CreatePrincipal(store.PrincipalClassAgent, req.AgentSlug)
+			if err != nil {
+				log.Printf("handleAdminMachineKeys: create principal %q: %v", req.AgentSlug, err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Generate raw secret (UUID v4 — no special chars, safe for lucos_creds storage).
+		rawSecret := uuid.New().String()
+
+		// Validate the hash we're about to store: confirm it's 64 hex characters.
+		secretHash := hashMachineKey(rawSecret)
+		if len(secretHash) != machineKeyHashLen {
+			// This would be a bug — SHA-256 always produces 32 bytes → 64 hex chars.
+			log.Printf("handleAdminMachineKeys: unexpected hash length %d", len(secretHash))
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		// Store only the hash — raw secret never touches the DB.
+		label := fmt.Sprintf("machine_key:%s", req.AgentSlug)
+		cred, err := s.CreateCredential(principal.ID, store.CredentialTypeMachineKey, []byte(secretHash), label)
+		if err != nil {
+			log.Printf("handleAdminMachineKeys: create credential for %q: %v", req.AgentSlug, err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(createMachineKeyResponse{
+			ClientID:     req.AgentSlug,
+			ClientSecret: rawSecret,
+			CredentialID: cred.ID,
+			CreatedAt:    cred.CreatedAt,
+			Note:         "Store client_secret in lucos_creds immediately — it is shown only once and not stored by aithne.",
+		})
+	}
+}
