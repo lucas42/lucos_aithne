@@ -665,7 +665,7 @@ func TestLoginBegin_PrincipalWithNoCredentials(t *testing.T) {
 	}
 }
 
-func TestLoginBegin_MissingContactID(t *testing.T) {
+func TestLoginBegin_EmptyContactID_Discoverable(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -674,14 +674,53 @@ func TestLoginBegin_MissingContactID(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
+	// Empty contact_id triggers the discoverable login path (allowCredentials=[]).
 	body, _ := json.Marshal(map[string]string{})
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/begin", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	handleLoginBegin(s, wa, cs)(rr, req)
 
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for discoverable login begin, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	var opts map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&opts); err != nil {
+		t.Fatalf("decode options: %v", err)
+	}
+	if _, ok := opts["publicKey"]; !ok {
+		t.Error("response missing publicKey field")
+	}
+	sessionID, _ := opts["aithne_session"].(string)
+	if sessionID == "" {
+		t.Error("response missing aithne_session field — required for conditional mediation finish")
+	}
+	// Verify session was stored.
+	if _, ok := cs.take("login:disco:" + sessionID); !ok {
+		t.Error("ceremony store should hold discoverable session data after begin")
+	}
+}
+
+func TestLoginFinish_DiscoverableNoSession(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	// session param provided but no matching entry in the store.
+	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish?session=nonexistent-uuid", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handleLoginFinish(s, wa, cs, testIssuer, "development")(rr, req)
+
 	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing contact_id, got %d", rr.Code)
+		t.Errorf("expected 400 for missing discoverable session, got %d", rr.Code)
 	}
 }
 
@@ -708,7 +747,7 @@ func TestLoginFinish_NoSession(t *testing.T) {
 	}
 }
 
-func TestLoginFinish_MissingContactIDParam(t *testing.T) {
+func TestLoginFinish_NeitherContactIDNorSession(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -717,13 +756,14 @@ func TestLoginFinish_MissingContactIDParam(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
+	// Neither contact_id nor session provided — unambiguously bad request.
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish", strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	handleLoginFinish(s, wa, cs, testIssuer, "development")(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing contact_id param, got %d", rr.Code)
+		t.Errorf("expected 400 when neither contact_id nor session provided, got %d", rr.Code)
 	}
 }
 

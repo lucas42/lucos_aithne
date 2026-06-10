@@ -8,6 +8,17 @@ package main
 //   POST /auth/login/begin      — returns PublicKeyCredentialRequestOptions
 //   POST /auth/login/finish     — verifies + mints session JWT, sets cookie
 //
+// The login endpoints support two flows:
+//
+//  1. Explicit: contact_id is provided. The server loads the principal's
+//     credentials and returns allowCredentials=[(those IDs)].
+//
+//  2. Discoverable (conditional mediation): contact_id is empty. The server
+//     calls BeginDiscoverableLogin (allowCredentials=[]) and returns an
+//     aithne_session token alongside publicKey. The client passes this token as
+//     ?session=<id> on finish; the server uses the assertion's userHandle to
+//     identify the principal without a contact_id.
+//
 // See ADR-0001 §2 for the design: RP ID = l42.eu (registrable parent so the
 // login origin can move freely within the domain without invalidating passkeys).
 //
@@ -27,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	gwebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"lucos_aithne/store"
 	"lucos_aithne/token"
@@ -108,6 +120,13 @@ func loadWebAuthnUser(s *store.Store, contactID string) (*webAuthnUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadWebAuthnUserByPrincipal(s, p)
+}
+
+// loadWebAuthnUserByPrincipal is the inner loader used when the principal is
+// already known (e.g. resolved from the assertion's userHandle in the
+// discoverable login path).
+func loadWebAuthnUserByPrincipal(s *store.Store, p *store.Principal) (*webAuthnUser, error) {
 	creds, err := s.ListCredentialsByPrincipal(p.ID)
 	if err != nil {
 		return nil, err
@@ -285,14 +304,41 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 			http.Error(w, "400 Bad Request — invalid JSON", http.StatusBadRequest)
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
+
 		if req.ContactID == "" {
-			http.Error(w, "400 Bad Request — contact_id is required", http.StatusBadRequest)
+			// Discoverable login (conditional mediation): no contact_id supplied.
+			// The browser will offer any registered passkey for the RP ID.
+			// We return an aithne_session token alongside publicKey; the client
+			// must pass it as ?session=<token> on the finish request so we can
+			// match the session data without a contact_id.
+			assertion, sessionData, err := wa.BeginDiscoverableLogin()
+			if err != nil {
+				log.Printf("login/begin: BeginDiscoverableLogin: %v", err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			sessionID := uuid.New().String()
+			cs.put("login:disco:"+sessionID, sessionData)
+
+			// Embed the session ID into the response alongside the standard
+			// publicKey field so the JS can echo it back on finish.
+			assertionJSON, _ := json.Marshal(assertion)
+			var respMap map[string]json.RawMessage
+			json.Unmarshal(assertionJSON, &respMap)
+			sessionIDJSON, _ := json.Marshal(sessionID)
+			respMap["aithne_session"] = sessionIDJSON
+			if err := json.NewEncoder(w).Encode(respMap); err != nil {
+				log.Printf("login/begin: encode discoverable options: %v", err)
+			}
 			return
 		}
 
-		// Explicit principal check to distinguish ghost-principal from no-credentials
-		// (security rule #3). Both cases result in the same client-facing 404 to
-		// avoid contact-ID enumeration; the distinction is logged.
+		// Explicit login: contact_id is provided.
+		// Distinguish ghost-principal from no-credentials (security rule #3).
+		// Both cases return the same client-facing 404 to prevent enumeration;
+		// the distinction is logged server-side.
 		user, err := loadWebAuthnUser(s, req.ContactID)
 		if errors.Is(err, store.ErrNotFound) {
 			log.Printf("login/begin: principal not found for contact %q", req.ContactID)
@@ -312,14 +358,13 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 
 		assertion, sessionData, err := wa.BeginLogin(user)
 		if err != nil {
-			log.Printf("login/begin: BeginAuthentication %q: %v", req.ContactID, err)
+			log.Printf("login/begin: BeginLogin %q: %v", req.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
 		cs.put("login:"+req.ContactID, sessionData)
 
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(assertion); err != nil {
 			log.Printf("login/begin: encode options: %v", err)
 		}
@@ -334,40 +379,102 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		}
 
 		contactID := r.URL.Query().Get("contact_id")
-		if contactID == "" {
-			http.Error(w, "400 Bad Request — contact_id query param required", http.StatusBadRequest)
+		sessionID := r.URL.Query().Get("session")
+
+		if contactID == "" && sessionID == "" {
+			http.Error(w, "400 Bad Request — contact_id or session query param required", http.StatusBadRequest)
 			return
 		}
 
-		sessionData, ok := cs.take("login:" + contactID)
-		if !ok {
-			http.Error(w, "400 Bad Request — no pending authentication (expired or not started)", http.StatusBadRequest)
-			return
-		}
+		var user *webAuthnUser
+		var sessionData *gwebauthn.SessionData
+		var updatedCred *gwebauthn.Credential
 
-		user, err := loadWebAuthnUser(s, contactID)
-		if errors.Is(err, store.ErrNotFound) {
-			http.Error(w, "404 Not Found — principal not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			log.Printf("login/finish: load user %q: %v", contactID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-			return
-		}
+		if sessionID != "" {
+			// Discoverable login path: look up session by token, then identify
+			// the principal from the assertion's userHandle after verification.
+			var ok bool
+			sessionData, ok = cs.take("login:disco:" + sessionID)
+			if !ok {
+				http.Error(w, "400 Bad Request — no pending authentication (expired or not started)", http.StatusBadRequest)
+				return
+			}
 
-		updatedCred, err := wa.FinishLogin(user, *sessionData, r)
-		if err != nil {
-			log.Printf("login/finish: FinishAuthentication %q: %v", contactID, err)
-			http.Error(w, "401 Unauthorized — authentication failed", http.StatusUnauthorized)
-			return
+			// Build a DiscoverableUserHandler that resolves the principal from
+			// the userHandle embedded in the assertion (set as principal ID at
+			// registration time via webAuthnUser.WebAuthnID()).
+			var handlerErr error
+			handler := func(rawID, userHandle []byte) (gwebauthn.User, error) {
+				principalID := string(userHandle)
+				p, err := s.GetPrincipalByID(principalID)
+				if err != nil {
+					handlerErr = err
+					return nil, err
+				}
+				u, err := loadWebAuthnUserByPrincipal(s, p)
+				if err != nil {
+					handlerErr = err
+					return nil, err
+				}
+				user = u
+				return u, nil
+			}
+
+			var err error
+			updatedCred, err = wa.FinishDiscoverableLogin(handler, *sessionData, r)
+			if err != nil {
+				if handlerErr != nil {
+					if errors.Is(handlerErr, store.ErrNotFound) {
+						http.Error(w, "404 Not Found — principal not found", http.StatusNotFound)
+					} else {
+						log.Printf("login/finish: discoverable user lookup: %v", handlerErr)
+						http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+					}
+				} else {
+					log.Printf("login/finish: FinishDiscoverableLogin: %v", err)
+					http.Error(w, "401 Unauthorized — authentication failed", http.StatusUnauthorized)
+				}
+				return
+			}
+			if user == nil {
+				// Handler was not called — malformed assertion; library should have errored but be safe.
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// Explicit login path: principal identified by contact_id.
+			var ok bool
+			sessionData, ok = cs.take("login:" + contactID)
+			if !ok {
+				http.Error(w, "400 Bad Request — no pending authentication (expired or not started)", http.StatusBadRequest)
+				return
+			}
+
+			var err error
+			user, err = loadWebAuthnUser(s, contactID)
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, "404 Not Found — principal not found", http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				log.Printf("login/finish: load user %q: %v", contactID, err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+
+			updatedCred, err = wa.FinishLogin(user, *sessionData, r)
+			if err != nil {
+				log.Printf("login/finish: FinishLogin %q: %v", contactID, err)
+				http.Error(w, "401 Unauthorized — authentication failed", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		// Sign-count replay protection (FIDO2 §6.1.3, security rule #1).
 		// The library sets CloneWarning=true when the asserted sign count is ≤
 		// the stored count and the stored count is non-zero.
 		if updatedCred.Authenticator.CloneWarning {
-			log.Printf("login/finish: sign-count clone warning for contact %q — rejecting", contactID)
+			log.Printf("login/finish: sign-count clone warning for principal %s — rejecting", user.principal.ID)
 			http.Error(w, "403 Forbidden — authenticator clone detected (sign count regression)", http.StatusForbidden)
 			return
 		}
@@ -379,14 +486,14 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 				// Non-fatal: log and continue. The session is still valid; the
 				// sign count update failing means the next auth is slightly less
 				// protected but not broken.
-				log.Printf("login/finish: update sign count for %q: %v", contactID, err)
+				log.Printf("login/finish: update sign count for principal %s: %v", user.principal.ID, err)
 			}
 		}
 
 		// Mint session JWT with the principal's active scopes.
 		scopes, err := s.GetActiveScopes(user.principal.ID, environment)
 		if err != nil {
-			log.Printf("login/finish: get active scopes %q: %v", contactID, err)
+			log.Printf("login/finish: get active scopes for principal %s: %v", user.principal.ID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -398,7 +505,7 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		}
 		tok, err := token.MintSession(user.principal, scopes, signingKey, issuer, "l42.eu", token.DefaultSessionTTL)
 		if err != nil {
-			log.Printf("login/finish: mint session for %q: %v", contactID, err)
+			log.Printf("login/finish: mint session for principal %s: %v", user.principal.ID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}

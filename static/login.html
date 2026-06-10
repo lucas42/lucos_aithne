@@ -262,18 +262,21 @@
           body: JSON.stringify({ contact_id: '' }),
           signal: conditionalAbort.signal,
         });
-        if (!beginResp.ok) return; // server requires contact_id — skip silently
+        if (!beginResp.ok) return; // silently skip if server rejects empty contact_id
 
-        const publicKey = decodeCredentialRequestOptions(await beginResp.json());
+        const data = await beginResp.json();
+        const sessionId = data.aithne_session; // server-issued token to correlate begin/finish
+        const publicKey = decodeCredentialRequestOptions(data);
         const assertion = await navigator.credentials.get({
           publicKey,
           mediation: 'conditional',
           signal: conditionalAbort.signal,
         });
 
-        // Finish: server must accept empty contact_id and use userHandle to
-        // identify the principal (not yet implemented — see comment above).
-        const finishResp = await fetch('/auth/login/finish', {
+        // Pass the session token so the server can match the begin session and
+        // identify the principal from the assertion's userHandle.
+        const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
+        const finishResp = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(encodeAssertion(assertion)),
