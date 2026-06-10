@@ -27,6 +27,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -264,15 +265,17 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 		return
 	}
 
-	// Constant-time check of the client secret hash.
+	// Constant-time comparison of the OIDC client secret hash (prevents timing attacks).
 	secretHash := hashOIDCSecret(clientSecret)
-	if secretHash != client.SecretHash {
+	if subtle.ConstantTimeCompare([]byte(secretHash), []byte(client.SecretHash)) != 1 {
 		writeTokenError(w, http.StatusUnauthorized, "invalid_client", "invalid client_id or client_secret")
 		return
 	}
 
-	// Consume the authorization code (single-use, expiry-checked inside).
-	authCode, err := s.ConsumeOIDCAuthCode(code)
+	// Validate the auth code (read-only) BEFORE consuming it.
+	// Per RFC 6749 §4.1.3, validation failures must NOT consume the code — the
+	// legitimate client holder must be able to retry with the correct parameters.
+	pendingCode, err := s.GetOIDCAuthCode(code)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "unknown authorization code")
@@ -284,18 +287,33 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code has already been used")
 		return
 	case err != nil:
-		log.Printf("handleAuthCodeGrant: consume auth code: %v", err)
+		log.Printf("handleAuthCodeGrant: get auth code: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
 
-	// Verify client_id and redirect_uri match those stored in the auth code.
-	if authCode.ClientID != clientID {
+	// Validate client_id and redirect_uri match what was stored at authorization time.
+	if pendingCode.ClientID != clientID {
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
 		return
 	}
-	if authCode.RedirectURI != redirectURI {
+	if pendingCode.RedirectURI != redirectURI {
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
+		return
+	}
+
+	// Validation passed — atomically consume the code (marks used_at, double-checks expiry/used).
+	authCode, err := s.ConsumeOIDCAuthCode(code)
+	switch {
+	case errors.Is(err, store.ErrAuthCodeExpired):
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code has expired")
+		return
+	case errors.Is(err, store.ErrAuthCodeUsed):
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code has already been used")
+		return
+	case err != nil:
+		log.Printf("handleAuthCodeGrant: consume auth code: %v", err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
 

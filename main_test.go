@@ -2146,6 +2146,48 @@ func TestOAuth2Token_AuthCodeGrant_RedirectURIMismatch(t *testing.T) {
 	}
 }
 
+func TestOAuth2Token_AuthCodeGrant_RedirectURIMismatch_CodeNotConsumed(t *testing.T) {
+	// RFC 6749 §4.1.3: a validation failure must NOT consume the code —
+	// the legitimate holder should be able to retry with the correct redirect_uri.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-survive", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-survive", "https://rp.test/cb", "frank", "s", "n")
+
+	// First exchange — wrong redirect_uri; should return 400 and NOT consume the code.
+	badBody := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-survive&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/WRONG"))
+	badReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", badBody)
+	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	badRR := httptest.NewRecorder()
+	mux.ServeHTTP(badRR, badReq)
+	if badRR.Code != http.StatusBadRequest {
+		t.Fatalf("wrong redirect_uri: expected 400, got %d", badRR.Code)
+	}
+
+	// Second exchange — correct redirect_uri; code must still be valid.
+	goodBody := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-survive&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	goodReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", goodBody)
+	goodReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	goodRR := httptest.NewRecorder()
+	mux.ServeHTTP(goodRR, goodReq)
+	if goodRR.Code != http.StatusOK {
+		t.Errorf("correct redirect_uri after mismatch: expected 200, got %d — body: %s",
+			goodRR.Code, goodRR.Body.String())
+	}
+}
+
 func TestOAuth2Token_UnsupportedGrantType(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {

@@ -163,6 +163,56 @@ func (s *Store) CreateOIDCAuthCode(rawCode, clientID, principalID, redirectURI, 
 	return nil
 }
 
+// GetOIDCAuthCode looks up an authorization code without consuming it.
+// Returns ErrNotFound if the code hash is unknown.
+// Returns ErrAuthCodeExpired if the code has passed its expiry.
+// Returns ErrAuthCodeUsed if the code has already been consumed.
+// Use this for pre-validation (checking client_id / redirect_uri match) before
+// calling ConsumeOIDCAuthCode — RFC 6749 §4.1.3 requires that validation errors
+// do NOT invalidate the code so the legitimate holder can retry with correct params.
+func (s *Store) GetOIDCAuthCode(rawCode string) (*OIDCAuthCode, error) {
+	codeHash := HashToken(rawCode)
+	row := s.db.QueryRow(
+		`SELECT code_hash, client_id, principal_id, redirect_uri, scope, nonce,
+		        expires_at, created_at, used_at
+		 FROM oidc_auth_codes WHERE code_hash = ?`,
+		codeHash,
+	)
+	var ac OIDCAuthCode
+	var expiresAtStr, createdAtStr string
+	var usedAtStr *string
+	if err := row.Scan(
+		&ac.CodeHash, &ac.ClientID, &ac.PrincipalID, &ac.RedirectURI,
+		&ac.Scope, &ac.Nonce, &expiresAtStr, &createdAtStr, &usedAtStr,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: get oidc auth code: %w", err)
+	}
+
+	expTime, err := parseTime(expiresAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse auth code expires_at: %w", err)
+	}
+	ac.ExpiresAt = expTime
+
+	createdTime, err := parseTime(createdAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse auth code created_at: %w", err)
+	}
+	ac.CreatedAt = createdTime
+
+	if usedAtStr != nil {
+		return nil, ErrAuthCodeUsed
+	}
+	if time.Now().After(expTime) {
+		return nil, ErrAuthCodeExpired
+	}
+
+	return &ac, nil
+}
+
 // ConsumeOIDCAuthCode atomically looks up and marks the authorization code as used.
 // Returns ErrNotFound if the code hash is unknown.
 // Returns ErrAuthCodeExpired if the code has passed its expiry.
