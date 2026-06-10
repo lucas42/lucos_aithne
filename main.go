@@ -540,16 +540,42 @@ func main() {
 	}
 	log.Printf("Scope vocabulary loaded: %v", vocab.All())
 
+	// Read the signing key KEK from the environment. Must be exactly 32 bytes
+	// for AES-256-GCM. Stored in lucos_creds as SIGNING_KEK.
+	//
+	// The value MUST be randomly generated — not a human-typed passphrase.
+	// Generate a suitable value with:
+	//   openssl rand -base64 32 | head -c 32
+	// Store the result in lucos_creds; never commit it to source control.
+	signingKEKStr := getEnvRequired("SIGNING_KEK")
+	if len(signingKEKStr) != 32 {
+		log.Fatalf("SIGNING_KEK must be exactly 32 bytes, got %d", len(signingKEKStr))
+	}
+	var signingKEK [32]byte
+	copy(signingKEK[:], signingKEKStr)
+
 	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
 	if err := ensureDir(dbPath); err != nil {
 		log.Fatalf("Cannot create data directory for %q: %v", dbPath, err)
 	}
-	s, err := store.Open(dbPath)
+	s, err := store.Open(dbPath, signingKEK)
 	if err != nil {
 		log.Fatalf("Failed to open principal/credential store at %q: %v", dbPath, err)
 	}
 	defer s.Close()
 	log.Printf("Principal/credential store ready at %s", dbPath)
+
+	// Migrate any signing keys stored in the legacy unencrypted PKCS8 DER format
+	// to AES-256-GCM ciphertext. No-op on a fresh DB or after the first post-upgrade
+	// startup. Must run before GetOrCreateActiveSigningKey, which would otherwise
+	// fail to decrypt legacy rows.
+	migrated, err := s.MigrateSigningKeyEncryption()
+	if err != nil {
+		log.Fatalf("Failed to migrate signing key encryption: %v", err)
+	}
+	if migrated > 0 {
+		log.Printf("Migrated %d signing key(s) from legacy plaintext to AES-256-GCM encryption", migrated)
+	}
 
 	// Ensure an active signing key exists before we start serving.
 	// On first boot this generates a fresh ES256 key; on subsequent boots it

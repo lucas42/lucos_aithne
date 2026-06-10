@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/x509"
 	"testing"
 	"time"
@@ -180,5 +181,130 @@ func TestListVerificationKeys_ExcludesExpiredRetired(t *testing.T) {
 		if k.Status == "retired" {
 			t.Errorf("future cutoff: unexpected retired key %q", k.ID)
 		}
+	}
+}
+
+// TestEncryptDecryptKeyDER verifies the AES-256-GCM round-trip and wrong-KEK rejection.
+func TestEncryptDecryptKeyDER(t *testing.T) {
+	kek := testKEK
+	original := []byte("fake private key DER for unit testing encryptKeyDER/decryptKeyDER")
+
+	encrypted, err := encryptKeyDER(kek, original)
+	if err != nil {
+		t.Fatalf("encryptKeyDER: %v", err)
+	}
+	if bytes.Equal(encrypted, original) {
+		t.Error("encrypted bytes are identical to plaintext — no encryption occurred")
+	}
+
+	decrypted, err := decryptKeyDER(kek, encrypted)
+	if err != nil {
+		t.Fatalf("decryptKeyDER: %v", err)
+	}
+	if !bytes.Equal(decrypted, original) {
+		t.Errorf("round-trip mismatch: got %q, want %q", decrypted, original)
+	}
+
+	// A different KEK must cause decryption to fail (GCM authentication error).
+	var wrongKEK [32]byte
+	wrongKEK[0] = 0xFF
+	if _, err := decryptKeyDER(wrongKEK, encrypted); err == nil {
+		t.Error("expected error decrypting with wrong KEK, got nil")
+	}
+}
+
+// TestMigrateSigningKeyEncryption verifies that legacy unencrypted PKCS8 DER rows
+// are detected and re-encrypted by MigrateSigningKeyEncryption.
+func TestMigrateSigningKeyEncryption(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a raw (unencrypted) PKCS8 DER key directly, bypassing the store's
+	// encrypt path — this simulates a row written by the pre-encryption code.
+	legacyKey, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+	// Overwrite the encrypted blob with the raw plaintext DER.
+	if _, err := s.db.Exec(
+		`UPDATE signing_keys SET private_key = ? WHERE id = ?`,
+		legacyKey.PrivateKey, legacyKey.ID,
+	); err != nil {
+		t.Fatalf("set raw DER in DB: %v", err)
+	}
+
+	// Confirm that reading the key back now fails (GCM auth error on raw DER).
+	row := s.db.QueryRow(
+		`SELECT id, algorithm, private_key, status, created_at, retired_at
+		 FROM signing_keys WHERE id = ?`, legacyKey.ID,
+	)
+	if _, err := scanSigningKey(row, testKEK); err == nil {
+		t.Fatal("expected decrypt error on raw DER blob, got nil — migration test precondition failed")
+	}
+
+	// Run the migration.
+	migrated, err := s.MigrateSigningKeyEncryption()
+	if err != nil {
+		t.Fatalf("MigrateSigningKeyEncryption: %v", err)
+	}
+	if migrated != 1 {
+		t.Errorf("migrated: got %d, want 1", migrated)
+	}
+
+	// Key must now decrypt correctly.
+	k, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey after migration: %v", err)
+	}
+	if k.ID != legacyKey.ID {
+		t.Errorf("key ID changed during migration: got %q, want %q", k.ID, legacyKey.ID)
+	}
+	if !bytes.Equal(k.PrivateKey, legacyKey.PrivateKey) {
+		t.Error("private key material changed during migration")
+	}
+
+	// Raw DB blob must now be encrypted (not valid PKCS8).
+	var rawBlob []byte
+	if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, k.ID).Scan(&rawBlob); err != nil {
+		t.Fatalf("read raw blob: %v", err)
+	}
+	if _, parseErr := x509.ParsePKCS8PrivateKey(rawBlob); parseErr == nil {
+		t.Error("raw blob is still valid PKCS8 after migration — not encrypted")
+	}
+
+	// Running migration a second time must be a no-op (already encrypted).
+	migrated2, err := s.MigrateSigningKeyEncryption()
+	if err != nil {
+		t.Fatalf("second MigrateSigningKeyEncryption: %v", err)
+	}
+	if migrated2 != 0 {
+		t.Errorf("second migration: expected 0 rows migrated, got %d", migrated2)
+	}
+}
+
+// TestSigningKeyEncryptedAtRest verifies that the private_key BLOB stored in SQLite
+// is AES-GCM ciphertext and not raw PKCS8 DER.
+func TestSigningKeyEncryptedAtRest(t *testing.T) {
+	s := newTestStore(t)
+	k, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	// Read the raw blob directly from SQLite, bypassing the store's decrypt path.
+	var rawBlob []byte
+	if err := s.db.QueryRow(
+		`SELECT private_key FROM signing_keys WHERE id = ?`, k.ID,
+	).Scan(&rawBlob); err != nil {
+		t.Fatalf("read raw blob from DB: %v", err)
+	}
+
+	// The raw blob must differ from the plaintext DER.
+	if bytes.Equal(rawBlob, k.PrivateKey) {
+		t.Error("private_key blob in DB matches plaintext DER — key is NOT encrypted at rest")
+	}
+
+	// The raw blob must NOT be parseable as PKCS8 (that would mean it's stored unencrypted).
+	if _, parseErr := x509.ParsePKCS8PrivateKey(rawBlob); parseErr == nil {
+		t.Error("raw private_key blob in DB is valid PKCS8 — key is stored unencrypted")
 	}
 }
