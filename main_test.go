@@ -2446,6 +2446,236 @@ func TestAdminOIDCClients_DuplicateClientID(t *testing.T) {
 	}
 }
 
+// ============================================================
+// Bootstrap invite + bootstrapAdmin tests (lucos_aithne#49)
+// ============================================================
+
+// addWebAuthnCredential is a test helper that stores a minimal WebAuthn
+// credential for a principal. The data content is a stub; only the type
+// matters for the credential-gate logic.
+func addWebAuthnCredential(t *testing.T, s *store.Store, principalID string) {
+	t.Helper()
+	if _, err := s.CreateCredential(principalID, store.CredentialTypeWebAuthn, []byte("stub-cred-data"), "test key"); err != nil {
+		t.Fatalf("addWebAuthnCredential: %v", err)
+	}
+}
+
+// --- bootstrapInvite tests ---
+
+func TestBootstrapInvite_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "bootstrap-contact-1"
+	const appOrigin = "https://aithne.test"
+
+	inviteURL, err := bootstrapInvite(s, contactID, appOrigin)
+	if err != nil {
+		t.Fatalf("bootstrapInvite: %v", err)
+	}
+
+	// URL must be the right shape.
+	if !strings.HasPrefix(inviteURL, appOrigin+"/enrol?token=") {
+		t.Errorf("invite URL has wrong shape: %q", inviteURL)
+	}
+
+	// Extract raw token and verify it resolves to a valid invite in the store.
+	rawToken := strings.TrimPrefix(inviteURL, appOrigin+"/enrol?token=")
+	inv, err := s.GetInviteByRawToken(rawToken)
+	if err != nil {
+		t.Fatalf("GetInviteByRawToken: %v", err)
+	}
+	if inv.ContactID != contactID {
+		t.Errorf("invite ContactID: got %q, want %q", inv.ContactID, contactID)
+	}
+	if inv.CreatedBy != "bootstrap-cli" {
+		t.Errorf("invite CreatedBy: got %q, want %q", inv.CreatedBy, "bootstrap-cli")
+	}
+	if !inv.IsValid(time.Now()) {
+		t.Error("invite should be valid immediately after creation")
+	}
+}
+
+func TestBootstrapInvite_CreatesPrincipalIfAbsent(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "new-bootstrap-contact"
+	// Principal does not exist yet.
+	if _, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound before invite, got %v", err)
+	}
+
+	if _, err := bootstrapInvite(s, contactID, "https://aithne.test"); err != nil {
+		t.Fatalf("bootstrapInvite: %v", err)
+	}
+
+	// Principal must now exist.
+	if _, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID); err != nil {
+		t.Errorf("expected principal to be created: %v", err)
+	}
+}
+
+func TestBootstrapInvite_MultipleInvitesAllowed(t *testing.T) {
+	// Calling bootstrapInvite twice should produce two distinct tokens.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "bootstrap-multi"
+	const appOrigin = "https://aithne.test"
+
+	url1, err := bootstrapInvite(s, contactID, appOrigin)
+	if err != nil {
+		t.Fatalf("first bootstrapInvite: %v", err)
+	}
+	url2, err := bootstrapInvite(s, contactID, appOrigin)
+	if err != nil {
+		t.Fatalf("second bootstrapInvite: %v", err)
+	}
+	if url1 == url2 {
+		t.Error("two calls should produce distinct invite URLs")
+	}
+}
+
+// --- bootstrapAdmin tests ---
+
+func TestBootstrapAdmin_SeedsGrantWhenNoCredential(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "bootstrap-admin-test"
+	bootstrapAdmin(s, contactID, "development", testMainVocab)
+
+	p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
+	if err != nil {
+		t.Fatalf("GetPrincipalByExternalID: %v", err)
+	}
+	scopes, err := s.GetActiveScopes(p.ID, "development")
+	if err != nil {
+		t.Fatalf("GetActiveScopes: %v", err)
+	}
+	found := false
+	for _, sc := range scopes {
+		if sc == "aithne:admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected aithne:admin in active scopes after bootstrap, got %v", scopes)
+	}
+}
+
+func TestBootstrapAdmin_NoopWhenWebAuthnCredentialExists(t *testing.T) {
+	// Gate tripped: principal has a WebAuthn credential → bootstrapAdmin must
+	// NOT touch the grant store (no new grant created).
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "enrolled-admin"
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, contactID)
+	if err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	addWebAuthnCredential(t, s, p.ID)
+
+	// Call bootstrapAdmin — should be a no-op.
+	bootstrapAdmin(s, contactID, "development", testMainVocab)
+
+	// No aithne:admin grant should exist.
+	scopes, err := s.GetActiveScopes(p.ID, "development")
+	if err != nil {
+		t.Fatalf("GetActiveScopes: %v", err)
+	}
+	for _, sc := range scopes {
+		if sc == "aithne:admin" {
+			t.Errorf("aithne:admin grant must not be created when WebAuthn credential exists; got scopes %v", scopes)
+		}
+	}
+}
+
+func TestBootstrapAdmin_NoopDoesNotResurrectRevokedGrant(t *testing.T) {
+	// If a grant was deliberately revoked AND a passkey exists, bootstrapAdmin
+	// must not resurrect the grant (gate fires before the CreateGrant call).
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "revoked-admin"
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, contactID)
+	if err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+
+	// Seed a grant, then revoke it.
+	grant, err := s.CreateGrant(p.ID, "aithne:admin", "development", "test", testMainVocab)
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	if err := s.RevokeGrant(grant.ID, "test-revoke"); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+
+	// Now add a WebAuthn credential — gate should fire and skip the re-seed.
+	addWebAuthnCredential(t, s, p.ID)
+	bootstrapAdmin(s, contactID, "development", testMainVocab)
+
+	// Grant must still be revoked (no active aithne:admin).
+	scopes, err := s.GetActiveScopes(p.ID, "development")
+	if err != nil {
+		t.Fatalf("GetActiveScopes: %v", err)
+	}
+	for _, sc := range scopes {
+		if sc == "aithne:admin" {
+			t.Errorf("revoked grant must not be resurrected by bootstrapAdmin when credential exists; got scopes %v", scopes)
+		}
+	}
+}
+
+func TestBootstrapAdmin_IdempotentWhenNoCredential(t *testing.T) {
+	// Calling bootstrapAdmin twice without a credential: idempotent, still one grant.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	const contactID = "idempotent-admin"
+	bootstrapAdmin(s, contactID, "development", testMainVocab)
+	bootstrapAdmin(s, contactID, "development", testMainVocab) // second call must not panic or duplicate
+
+	p, _ := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
+	scopes, err := s.GetActiveScopes(p.ID, "development")
+	if err != nil {
+		t.Fatalf("GetActiveScopes: %v", err)
+	}
+	adminCount := 0
+	for _, sc := range scopes {
+		if sc == "aithne:admin" {
+			adminCount++
+		}
+	}
+	if adminCount != 1 {
+		t.Errorf("expected exactly 1 active aithne:admin grant after two bootstrap calls, got %d", adminCount)
+	}
+}
+
 // --- store.OIDCClient tests ---
 
 func TestOIDCClientHasRedirectURI(t *testing.T) {

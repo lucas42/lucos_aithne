@@ -20,6 +20,7 @@ import (
 	"time"
 
 	gwebauthn "github.com/go-webauthn/webauthn/webauthn"
+	"github.com/google/uuid"
 	"lucos_aithne/store"
 	"lucos_aithne/token"
 )
@@ -172,10 +173,10 @@ func parseScopesYAML(data []byte) (*store.Vocabulary, error) {
 }
 
 // bootstrapAdmin ensures the principal identified by contactID has the
-// aithne:admin grant for environment. It is idempotent: if the principal or
-// grant already exist, this is a no-op.
-// This is a development convenience until the proper admin enrolment flow lands
-// (lucos_aithne#10). Set BOOTSTRAP_ADMIN_CONTACT_ID on startup to activate.
+// aithne:admin grant for environment. Per ADR-0002, it self-disables once the
+// principal holds ≥1 WebAuthn credential — at that point the admin has a usable
+// passkey and the bootstrap grant is no longer needed to be re-seeded.
+// Set BOOTSTRAP_ADMIN_CONTACT_ID on startup to activate.
 func bootstrapAdmin(s *store.Store, contactID, environment string, vocab *store.Vocabulary) {
 	// Ensure the principal exists.
 	p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
@@ -191,6 +192,28 @@ func bootstrapAdmin(s *store.Store, contactID, environment string, vocab *store.
 		return
 	}
 
+	// Credential gate (ADR-0002 decision 2): if the principal already holds a
+	// WebAuthn credential the enrolment is complete — do NOT touch grants.
+	// Gating on credential (not principal) ensures that catastrophic-recovery
+	// re-enrolment still gets a grant even though the principal already exists.
+	creds, err := s.ListCredentialsByPrincipal(p.ID)
+	if err != nil {
+		log.Printf("bootstrap: list credentials for %q: %v", contactID, err)
+		return
+	}
+	for _, c := range creds {
+		if c.Type == store.CredentialTypeWebAuthn {
+			log.Printf("WARNING: BOOTSTRAP_ADMIN_CONTACT_ID is set for contact %q — "+
+				"passkey already enrolled. The env var can now be removed.", contactID)
+			return
+		}
+	}
+
+	// Not-yet-enrolled: warn the operator that the bootstrap is still active.
+	log.Printf("WARNING: BOOTSTRAP_ADMIN_CONTACT_ID is set for contact %q — "+
+		"bootstrap active. Run `--bootstrap-invite` to get an enrolment URL and "+
+		"remove the env var after enrolment is complete.", contactID)
+
 	// Ensure the aithne:admin grant exists.
 	_, err = s.CreateGrant(p.ID, "aithne:admin", environment, "bootstrap", vocab)
 	if errors.Is(err, store.ErrDuplicate) {
@@ -202,6 +225,70 @@ func bootstrapAdmin(s *store.Store, contactID, environment string, vocab *store.
 		return
 	}
 	log.Printf("bootstrap: granted aithne:admin to contact %q in %s", contactID, environment)
+}
+
+// bootstrapInvite creates a single-use enrolment invite for the bootstrap
+// admin contact and returns its URL. It is the testable core of the
+// --bootstrap-invite subcommand.
+// contactID must equal BOOTSTRAP_ADMIN_CONTACT_ID — validated by the caller.
+// appOrigin is APP_ORIGIN (e.g. "https://aithne.l42.eu").
+func bootstrapInvite(s *store.Store, contactID, appOrigin string) (string, error) {
+	// Ensure the principal exists (get-or-create, same as bootstrapAdmin).
+	_, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
+	if errors.Is(err, store.ErrNotFound) {
+		if _, err = s.CreatePrincipal(store.PrincipalClassHuman, contactID); err != nil {
+			return "", fmt.Errorf("bootstrap-invite: create principal %q: %w", contactID, err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("bootstrap-invite: lookup principal %q: %w", contactID, err)
+	}
+
+	rawToken := uuid.New().String()
+	if _, err := s.CreateInvite(rawToken, contactID, "bootstrap-cli"); err != nil {
+		return "", fmt.Errorf("bootstrap-invite: create invite for %q: %w", contactID, err)
+	}
+
+	inviteURL := appOrigin + "/enrol?token=" + rawToken
+	return inviteURL, nil
+}
+
+// runBootstrapInvite is the entrypoint for the --bootstrap-invite subcommand.
+// It reads BOOTSTRAP_ADMIN_CONTACT_ID, opens the store, mints an invite URL,
+// prints it to stdout, and exits 0. Exits non-zero on any error.
+// The HTTP server is never started.
+func runBootstrapInvite() {
+	contactID := os.Getenv("BOOTSTRAP_ADMIN_CONTACT_ID")
+	if contactID == "" {
+		fmt.Fprintln(os.Stderr, "bootstrap-invite: BOOTSTRAP_ADMIN_CONTACT_ID is not set; cannot create invite")
+		os.Exit(1)
+	}
+
+	appOrigin := getEnvRequired("APP_ORIGIN")
+
+	signingKEKStr := getEnvRequired("SIGNING_KEK")
+	if len(signingKEKStr) != 32 {
+		fmt.Fprintf(os.Stderr, "bootstrap-invite: SIGNING_KEK must be exactly 32 bytes, got %d\n", len(signingKEKStr))
+		os.Exit(1)
+	}
+	var signingKEK [32]byte
+	copy(signingKEK[:], signingKEKStr)
+
+	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
+	s, err := store.Open(dbPath, signingKEK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bootstrap-invite: open store at %q: %v\n", dbPath, err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	inviteURL, err := bootstrapInvite(s, contactID, appOrigin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(inviteURL)
+	os.Exit(0)
 }
 
 // --- Admin HTTP handlers ---
@@ -527,6 +614,9 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
 		runHealthcheck(port)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--bootstrap-invite" {
+		runBootstrapInvite()
 	}
 
 	system := getEnvRequired("SYSTEM")
