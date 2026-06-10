@@ -69,7 +69,7 @@ Day-one, the non-human principal on this path is the **AI agent** (agent-registr
 
 Authentication is made easy and uniform; **authorisation is the real gate.** Scopes decompose into three concerns that live in different places:
 
-- **Vocabulary** — the set of valid `service:capability` scope strings. Central, neutral registry (§7).
+- **Vocabulary** — the set of valid `domain:capability` scope strings. Central, neutral registry (§7).
 - **Grant** — "principal P is granted scope S in environment E". Central, in aithne: **default-deny, human-gated, auditable, per-env, revocable**. The grant is stamped into the signed session. This is the crown jewel of the system.
 - **Enforcement** — does the presented scope permit *this* action? **Per-backend** — only the service knows what its actions mean. aithne makes an authenticated, scoped *assertion*; the backend makes the authorisation *decision*.
 
@@ -79,7 +79,7 @@ This supports lucas42's agent use-cases directly: agents may hold **narrow produ
 
 ### 7. Scope vocabulary — a dedicated repo, published as a docker image, consumed at build-time
 
-The scope vocabulary is **issuer-agnostic** (both aithne and `lucos_creds` issue scoped credentials), so it lives outside both. It is a **new repository** holding a YAML file of valid `service:capability` strings, namespaced by owning service, **published as a docker image** through the existing docker publish flow (semantic versioning for free). Both `lucos_aithne` and `lucos_creds` pull it in at **build-time** (e.g. `COPY --from` the published image) — **no runtime polling, caching, or retries**.
+The scope vocabulary is **issuer-agnostic** (both aithne and `lucos_creds` issue scoped credentials), so it lives outside both. It is a **new repository** holding a YAML file of valid `domain:capability` strings (a flat allowlist — the file *is* the set of valid scopes), namespaced by **resource/capability domain** rather than by owning service: a capability often spans services (e.g. `photos:add` is satisfied by `lucos_photos`, the Android app, and a future uploader) and some are genuinely estate-wide and sit **bare** (e.g. `render-ui`, `webhook`). It is **published as a docker image** through the existing docker publish flow (semantic versioning for free). Both `lucos_aithne` and `lucos_creds` pull it in at **build-time** (e.g. `COPY --from` the published image) — **no runtime polling, caching, or retries**.
 
 `lucos_creds` linked-credential scopes (currently character-class-validated freetext) are aligned to this vocabulary. Putting the registry in its own repo also lets it carry its own PR-approval policy (lucas42's approval required on every vocabulary change).
 
