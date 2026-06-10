@@ -15,6 +15,7 @@ services:
       - LUCOS_CONTACTS_ORIGIN
       - KEY_LUCOS_CONTACTS
       - SIGNING_KEK
+      - BOOTSTRAP_ADMIN_CONTACT_ID
     volumes:
       - credential_store:/data
     healthcheck:
