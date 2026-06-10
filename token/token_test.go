@@ -105,11 +105,14 @@ func TestParseSession_RoundTrip_Human(t *testing.T) {
 		t.Fatalf("BuildVerificationKeySet: %v", err)
 	}
 
-	claims, err := token.ParseSession(tokStr, keySet, testIssuer)
+	claims, err := token.ParseSession(tokStr, keySet, testIssuer, testAudience)
 	if err != nil {
 		t.Fatalf("ParseSession: %v", err)
 	}
 
+	if claims.JWTID == "" {
+		t.Error("JWTID should be non-empty")
+	}
 	if claims.Subject != "contact-roundtrip" {
 		t.Errorf("Subject: got %q, want %q", claims.Subject, "contact-roundtrip")
 	}
@@ -153,9 +156,12 @@ func TestParseSession_RoundTrip_Agent(t *testing.T) {
 		t.Fatalf("BuildVerificationKeySet: %v", err)
 	}
 
-	claims, err := token.ParseSession(tokStr, keySet, testIssuer)
+	claims, err := token.ParseSession(tokStr, keySet, testIssuer, testAudience)
 	if err != nil {
 		t.Fatalf("ParseSession: %v", err)
+	}
+	if claims.JWTID == "" {
+		t.Error("JWTID should be non-empty")
 	}
 	if claims.Subject != "lucos-developer" {
 		t.Errorf("Subject: got %q, want %q", claims.Subject, "lucos-developer")
@@ -177,9 +183,27 @@ func TestParseSession_RejectsWrongIssuer(t *testing.T) {
 	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
 	keySet, _ := token.BuildVerificationKeySet(keys)
 
-	_, err = token.ParseSession(tokStr, keySet, "https://evil.example.com")
+	_, err = token.ParseSession(tokStr, keySet, "https://evil.example.com", testAudience)
 	if err == nil {
 		t.Error("expected error for wrong issuer, got nil")
+	}
+}
+
+func TestParseSession_RejectsWrongAudience(t *testing.T) {
+	k, s := newTestSigningKey(t)
+	p := newTestPrincipal(t, s, store.PrincipalClassHuman, "contact-aud")
+
+	tokStr, err := token.MintSession(p, nil, k, testIssuer, testAudience, 0)
+	if err != nil {
+		t.Fatalf("MintSession: %v", err)
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+
+	_, err = token.ParseSession(tokStr, keySet, testIssuer, "evil.example.com")
+	if err == nil {
+		t.Error("expected error for wrong audience, got nil")
 	}
 }
 
@@ -212,7 +236,7 @@ func TestParseSession_RejectsExpiredToken(t *testing.T) {
 	// Give the nanosecond token time to actually expire.
 	time.Sleep(2 * time.Millisecond)
 
-	_, err = token.ParseSession(tokStr, keySet, testIssuer)
+	_, err = token.ParseSession(tokStr, keySet, testIssuer, testAudience)
 	if err == nil {
 		t.Error("expected error for expired token, got nil")
 	}
@@ -233,7 +257,7 @@ func TestParseSession_RejectsWrongKey(t *testing.T) {
 	keys2, _ := s2.ListVerificationKeys(token.VerificationWindow)
 	keySet2, _ := token.BuildVerificationKeySet(keys2)
 
-	_, err = token.ParseSession(tokStr, keySet2, testIssuer)
+	_, err = token.ParseSession(tokStr, keySet2, testIssuer, testAudience)
 	if err == nil {
 		t.Error("expected error when verifying with wrong key, got nil")
 	}

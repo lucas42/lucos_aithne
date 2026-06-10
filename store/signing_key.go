@@ -20,6 +20,12 @@ import (
 	"time"
 )
 
+// dbExec is a minimal interface satisfied by both *sql.DB and *sql.Tx,
+// allowing key-generation helpers to be reused inside transactions.
+type dbExec interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // SigningKey is an EC P-256 key used to sign and verify session JWTs.
 type SigningKey struct {
 	ID         string     // UUID v4 — used as JWK "kid"
@@ -68,15 +74,24 @@ func (s *Store) ListVerificationKeys(verificationWindow time.Duration) ([]*Signi
 	return collectSigningKeys(rows)
 }
 
-// RotateSigningKey generates a new active signing key and atomically retires
-// the previous active key. Returns the new active key.
+// RotateSigningKey atomically generates a new active signing key and retires
+// the previous active key. The INSERT and UPDATE run inside a single transaction
+// so a mid-rotation crash cannot leave the database with two active keys.
+// Returns the new active key.
 func (s *Store) RotateSigningKey() (*SigningKey, error) {
-	newKey, err := s.generateSigningKey()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("store: begin rotation tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is a best-effort cleanup
+
+	newKey, err := generateSigningKeyWith(tx)
 	if err != nil {
 		return nil, err
 	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		`UPDATE signing_keys SET status = 'retired', retired_at = ?
 		 WHERE status = 'active' AND id != ?`,
 		now, newKey.ID,
@@ -84,11 +99,22 @@ func (s *Store) RotateSigningKey() (*SigningKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: retire old signing key: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit rotation tx: %w", err)
+	}
 	return newKey, nil
 }
 
-// generateSigningKey creates a fresh ES256 key and inserts it as active.
+// generateSigningKey creates a fresh ES256 key and inserts it as active
+// using the store's main DB connection (non-transactional path).
 func (s *Store) generateSigningKey() (*SigningKey, error) {
+	return generateSigningKeyWith(s.db)
+}
+
+// generateSigningKeyWith inserts a new active ES256 key using the provided executor
+// (either *sql.DB or *sql.Tx).
+func generateSigningKeyWith(db dbExec) (*SigningKey, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate signing key id: %w", err)
@@ -102,7 +128,7 @@ func (s *Store) generateSigningKey() (*SigningKey, error) {
 		return nil, fmt.Errorf("store: marshal signing key: %w", err)
 	}
 	now := time.Now().UTC()
-	_, err = s.db.Exec(
+	_, err = db.Exec(
 		`INSERT INTO signing_keys (id, algorithm, private_key, status, created_at)
 		 VALUES (?, 'ES256', ?, 'active', ?)`,
 		id, der, now.Format(time.RFC3339),
@@ -111,11 +137,11 @@ func (s *Store) generateSigningKey() (*SigningKey, error) {
 		return nil, fmt.Errorf("store: insert signing key: %w", err)
 	}
 	return &SigningKey{
-		ID:        id,
-		Algorithm: "ES256",
+		ID:         id,
+		Algorithm:  "ES256",
 		PrivateKey: der,
-		Status:    "active",
-		CreatedAt: now,
+		Status:     "active",
+		CreatedAt:  now,
 	}, nil
 }
 

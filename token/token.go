@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -103,6 +104,7 @@ func MintSession(
 	}
 
 	now := time.Now().UTC()
+	jti := uuid.New().String()
 
 	// Build the token with standard + custom claims per ADR §3.
 	tok, err := jwt.NewBuilder().
@@ -111,6 +113,7 @@ func MintSession(
 		Audience([]string{audience}).
 		IssuedAt(now).
 		Expiration(now.Add(ttl)).
+		JwtID(jti).
 		Claim(ClaimPrincipalClass, string(p.Class)).
 		Claim(ClaimScopes, scopes).
 		Build()
@@ -128,11 +131,13 @@ func MintSession(
 // ParseSession parses and validates a session JWT string.
 // keySet must contain the public keys corresponding to the signing keys in use.
 // issuer must match the "iss" claim in the token.
-func ParseSession(tokenStr string, keySet jwk.Set, issuer string) (*SessionClaims, error) {
+// audience must appear in the token's "aud" claim.
+func ParseSession(tokenStr string, keySet jwk.Set, issuer, audience string) (*SessionClaims, error) {
 	tok, err := jwt.ParseString(tokenStr,
 		jwt.WithKeySet(keySet),
 		jwt.WithValidate(true),
 		jwt.WithIssuer(issuer),
+		jwt.WithAudience(audience),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("token: parse session: %w", err)
