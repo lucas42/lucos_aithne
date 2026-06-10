@@ -100,6 +100,63 @@ func TestRotateSigningKey(t *testing.T) {
 	}
 }
 
+func TestRotateSigningKeyIfOlderThan_RotatesWhenOld(t *testing.T) {
+	s := newTestStore(t)
+
+	original, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+
+	// A zero (or negative) maxAge means "always rotate" — any key is older than 0.
+	rotated, newKey, err := s.RotateSigningKeyIfOlderThan(0)
+	if err != nil {
+		t.Fatalf("RotateSigningKeyIfOlderThan(0): %v", err)
+	}
+	if !rotated {
+		t.Error("expected rotation when maxAge=0")
+	}
+	if newKey == nil {
+		t.Fatal("expected non-nil newKey on rotation")
+	}
+	if newKey.ID == original.ID {
+		t.Error("expected a different key ID after rotation")
+	}
+	if newKey.Status != "active" {
+		t.Errorf("newKey.Status: got %q, want active", newKey.Status)
+	}
+}
+
+func TestRotateSigningKeyIfOlderThan_NoopWhenRecent(t *testing.T) {
+	s := newTestStore(t)
+
+	original, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+
+	// A very large maxAge means the freshly-created key is well within the window.
+	rotated, newKey, err := s.RotateSigningKeyIfOlderThan(365 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("RotateSigningKeyIfOlderThan(365d): %v", err)
+	}
+	if rotated {
+		t.Error("expected no rotation for a fresh key within the window")
+	}
+	if newKey != nil {
+		t.Error("expected nil newKey when no rotation occurred")
+	}
+
+	// Active key must still be the original.
+	current, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey after no-op: %v", err)
+	}
+	if current.ID != original.ID {
+		t.Errorf("active key changed despite no rotation: got %q, want %q", current.ID, original.ID)
+	}
+}
+
 func TestListVerificationKeys_ExcludesExpiredRetired(t *testing.T) {
 	s := newTestStore(t)
 

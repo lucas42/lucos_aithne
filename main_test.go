@@ -1438,3 +1438,139 @@ func TestAdminMachineKeys_MissingSlug(t *testing.T) {
 		t.Fatalf("expected 400, got %d", rr.Code)
 	}
 }
+
+// --- Signing-key rotation tests ---
+
+// newRotationMux builds a test ServeMux with only the rotation endpoint.
+func newRotationMux(s *store.Store) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, testIssuer, handleRotateSigningKey(s)))
+	return mux
+}
+
+func TestAdminRotateSigningKey_Success(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// Create the initial signing key.
+	original, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/rotate-signing-key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newRotationMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["rotated"] != true {
+		t.Errorf("rotated: got %v, want true", resp["rotated"])
+	}
+	newKeyID, _ := resp["new_key_id"].(string)
+	if newKeyID == "" {
+		t.Error("new_key_id must not be empty")
+	}
+	if newKeyID == original.ID {
+		t.Error("new_key_id must differ from the original key ID")
+	}
+
+	// Verify the new key is the active one in the store.
+	current, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey after rotation: %v", err)
+	}
+	if current.ID != newKeyID {
+		t.Errorf("active key after rotation: got %q, want %q", current.ID, newKeyID)
+	}
+}
+
+func TestAdminRotateSigningKey_RequiresAdminScope(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/rotate-signing-key", nil)
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newRotationMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestAdminRotateSigningKey_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/rotate-signing-key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newRotationMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAdminRotateSigningKey_OldKeyStillVerifies(t *testing.T) {
+	// Verify that a token minted with the old key is still valid after rotation
+	// (ListVerificationKeys covers in-flight tokens during the VerificationWindow).
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// Mint a token with the original key.
+	originalKey, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "test-contact-rotation")
+	if err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	oldToken, err := token.MintSession(p, []string{}, originalKey, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("MintSession: %v", err)
+	}
+
+	// Rotate the key.
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/rotate-signing-key", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	newRotationMux(s).ServeHTTP(httptest.NewRecorder(), req)
+
+	// The old token must still verify using ListVerificationKeys.
+	keys, err := s.ListVerificationKeys(token.VerificationWindow)
+	if err != nil {
+		t.Fatalf("ListVerificationKeys: %v", err)
+	}
+	keySet, err := token.BuildVerificationKeySet(keys)
+	if err != nil {
+		t.Fatalf("BuildVerificationKeySet: %v", err)
+	}
+	if _, err := token.ParseSession(oldToken, keySet, testIssuer, testAudience); err != nil {
+		t.Errorf("old token should still verify after rotation within VerificationWindow: %v", err)
+	}
+}

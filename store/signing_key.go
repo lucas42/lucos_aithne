@@ -106,6 +106,29 @@ func (s *Store) RotateSigningKey() (*SigningKey, error) {
 	return newKey, nil
 }
 
+// RotateSigningKeyIfOlderThan rotates the active signing key if it was created
+// more than maxAge ago. Returns (true, newKey, nil) if rotation occurred, or
+// (false, nil, nil) if the key is still within the allowed age. Returns an
+// error if rotation fails.
+//
+// This is the primary rotation trigger called at startup (main.go). Pass
+// signingKeyRotationInterval (30 days) for normal operation; a zero or negative
+// duration forces rotation (useful in tests).
+func (s *Store) RotateSigningKeyIfOlderThan(maxAge time.Duration) (rotated bool, newKey *SigningKey, err error) {
+	k, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		return false, nil, fmt.Errorf("store: check signing key age: %w", err)
+	}
+	if time.Since(k.CreatedAt) <= maxAge {
+		return false, nil, nil
+	}
+	newKey, err = s.RotateSigningKey()
+	if err != nil {
+		return false, nil, fmt.Errorf("store: rotate signing key: %w", err)
+	}
+	return true, newKey, nil
+}
+
 // generateSigningKey creates a fresh ES256 key and inserts it as active
 // using the store's main DB connection (non-transactional path).
 func (s *Store) generateSigningKey() (*SigningKey, error) {

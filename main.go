@@ -55,6 +55,11 @@ var templateFS embed.FS
 
 const healthcheckTimeout = 5 * time.Second
 
+// signingKeyRotationInterval is the maximum age of a signing key before it is
+// rotated at startup. 30 days is well within industry norms for short-lived
+// signing keys on an auth service.
+const signingKeyRotationInterval = 30 * 24 * time.Hour
+
 // infoResponse is the `/_info` payload (Tier 1 + Tier 2 fields).
 // Tier 3 fields (icon, show_on_homepage, etc.) are omitted — this is an API-only service.
 type infoResponse struct {
@@ -345,6 +350,32 @@ func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.Handle
 	}
 }
 
+// handleRotateSigningKey serves POST /admin/rotate-signing-key.
+// It immediately rotates the active signing key regardless of its age, for use
+// during incident response (key compromise) or operator-driven rotation.
+// Requires aithne:admin scope (enforced by the requireAdminScope wrapper in main()).
+func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		newKey, err := s.RotateSigningKey()
+		if err != nil {
+			log.Printf("handleRotateSigningKey: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("Signing key rotated via admin endpoint — new key ID: %s", newKey.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"rotated":    true,
+			"new_key_id": newKey.ID,
+		})
+	}
+}
+
 // handleGrants dispatches GET (list) and POST (create) for /admin/grants.
 func handleGrants(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -524,6 +555,18 @@ func main() {
 	}
 	log.Printf("Signing key initialised")
 
+	// Startup age-check: rotate the signing key if it is older than the
+	// rotation interval. This runs on every deploy, bounding the maximum
+	// key lifetime to rotationInterval + mean-time-between-deploys.
+	// ListVerificationKeys covers in-flight tokens signed by the old key.
+	rotated, _, err := s.RotateSigningKeyIfOlderThan(signingKeyRotationInterval)
+	if err != nil {
+		log.Fatalf("Failed to check/rotate signing key: %v", err)
+	}
+	if rotated {
+		log.Printf("Signing key rotated at startup (exceeded %v)", signingKeyRotationInterval)
+	}
+
 	// Bootstrap admin if BOOTSTRAP_ADMIN_CONTACT_ID is set.
 	// This is a development convenience for bootstrapping the first admin before
 	// the enrolment flow can be used (the enrolment flow itself requires admin access).
@@ -572,6 +615,7 @@ func main() {
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, issuer, handleAdminMachineKeys(s)))
+	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, issuer, handleRotateSigningKey(s)))
 
 	// Invitee enrolment flow — invite-gated, no auth required.
 	mux.HandleFunc("/enrol", handleEnrolPage(s, contacts))
