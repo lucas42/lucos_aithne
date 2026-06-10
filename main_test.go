@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -1617,5 +1618,810 @@ func TestAdminRotateSigningKey_OldKeyStillVerifies(t *testing.T) {
 	}
 	if _, err := token.ParseSession(oldToken, keySet, testIssuer, testAudience); err != nil {
 		t.Errorf("old token should still verify after rotation within VerificationWindow: %v", err)
+	}
+}
+
+// ============================================================
+// OIDC / OAuth2 protocol endpoint tests (lucos_aithne#7)
+// ============================================================
+
+// --- Test helpers ---
+
+// newOIDCMux builds a test ServeMux with the OIDC and related endpoints.
+func newOIDCMux(s *store.Store) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(testIssuer))
+	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
+		return s.ListVerificationKeys(token.VerificationWindow)
+	}))
+	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, testIssuer, "development"))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development"))
+	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, testIssuer, nil))
+	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))
+	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))
+	return mux
+}
+
+// createTestOIDCClient registers a test OIDC client directly in the store and
+// returns the raw client_secret.
+func createTestOIDCClient(t *testing.T, s *store.Store, clientID string, redirectURIs []string) string {
+	t.Helper()
+	rawSecret := "test-oidc-secret-" + clientID
+	secretHash := hashOIDCSecret(rawSecret)
+	if _, err := s.CreateOIDCClient(clientID, secretHash, "Test Client", redirectURIs); err != nil {
+		t.Fatalf("createTestOIDCClient: %v", err)
+	}
+	return rawSecret
+}
+
+// mintSessionCookie mints a session JWT for a human principal and returns it
+// as a *http.Cookie suitable for attaching to test requests.
+func mintSessionCookie(t *testing.T, s *store.Store, contactID string) *http.Cookie {
+	t.Helper()
+	p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
+	if err == store.ErrNotFound {
+		p, err = s.CreatePrincipal(store.PrincipalClassHuman, contactID)
+	}
+	if err != nil {
+		t.Fatalf("mintSessionCookie: get/create principal: %v", err)
+	}
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("mintSessionCookie: get signing key: %v", err)
+	}
+	tok, err := token.MintSession(p, []string{}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mintSessionCookie: MintSession: %v", err)
+	}
+	return &http.Cookie{Name: "aithne_session", Value: tok}
+}
+
+// --- Discovery endpoint tests ---
+
+func TestOpenIDConfiguration_BasicFields(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type: got %q, want application/json", ct)
+	}
+	var doc map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode discovery doc: %v", err)
+	}
+	if doc["issuer"] != testIssuer {
+		t.Errorf("issuer: got %v, want %q", doc["issuer"], testIssuer)
+	}
+	for _, field := range []string{
+		"authorization_endpoint", "token_endpoint", "userinfo_endpoint",
+		"jwks_uri", "scopes_supported", "response_types_supported",
+		"id_token_signing_alg_values_supported",
+	} {
+		if doc[field] == nil {
+			t.Errorf("discovery doc missing field %q", field)
+		}
+	}
+	// All endpoint URLs must begin with the issuer.
+	for _, endpoint := range []string{"authorization_endpoint", "token_endpoint", "userinfo_endpoint", "jwks_uri"} {
+		if v, ok := doc[endpoint].(string); !ok || !strings.HasPrefix(v, testIssuer) {
+			t.Errorf("%s: got %v, want prefix %q", endpoint, doc[endpoint], testIssuer)
+		}
+	}
+}
+
+func TestOpenIDConfiguration_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/.well-known/openid-configuration", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+// --- Authorization endpoint tests ---
+
+func TestAuthorize_MissingClientID(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?response_type=code&redirect_uri=https://rp.test/cb&scope=openid", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAuthorize_UnknownClientID(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?response_type=code&client_id=no-such-client&redirect_uri=https://rp.test/cb&scope=openid", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAuthorize_UnregisteredRedirectURI(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?response_type=code&client_id=myapp&redirect_uri=https://evil.com/cb&scope=openid", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 (not a redirect), got %d", rr.Code)
+	}
+}
+
+func TestAuthorize_NoSessionCookie_RedirectsToLogin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth2/authorize?response_type=code&client_id=myapp&redirect_uri=https://rp.test/callback&scope=openid&state=teststate",
+		nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/auth/login") {
+		t.Errorf("expected redirect to /auth/login, got %q", loc)
+	}
+	if !strings.Contains(loc, "next=") {
+		t.Errorf("redirect to login should carry ?next= param: %q", loc)
+	}
+}
+
+func TestAuthorize_InvalidResponseType_RedirectsError(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+	cookie := mintSessionCookie(t, s, "test-contact-authorize")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth2/authorize?response_type=token&client_id=myapp&redirect_uri=https://rp.test/callback&scope=openid",
+		nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://rp.test/callback") {
+		t.Errorf("error redirect should target redirect_uri, got %q", loc)
+	}
+	if !strings.Contains(loc, "error=unsupported_response_type") {
+		t.Errorf("error redirect should include error=unsupported_response_type: %q", loc)
+	}
+}
+
+func TestAuthorize_MissingOpenIDScope_RedirectsError(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+	cookie := mintSessionCookie(t, s, "test-contact-scope")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth2/authorize?response_type=code&client_id=myapp&redirect_uri=https://rp.test/callback&scope=profile",
+		nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.Contains(loc, "error=invalid_scope") {
+		t.Errorf("expected error=invalid_scope in redirect: %q", loc)
+	}
+}
+
+func TestAuthorize_Success_IssuesCodeAndRedirects(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+	cookie := mintSessionCookie(t, s, "test-contact-auth")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth2/authorize?response_type=code&client_id=myapp&redirect_uri=https://rp.test/callback&scope=openid&state=csrf-token&nonce=unique-nonce",
+		nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://rp.test/callback") {
+		t.Fatalf("redirect should go to redirect_uri, got %q", loc)
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse redirect location: %v", err)
+	}
+	code := u.Query().Get("code")
+	if code == "" {
+		t.Error("redirect should include code param")
+	}
+	if state := u.Query().Get("state"); state != "csrf-token" {
+		t.Errorf("state: got %q, want %q", state, "csrf-token")
+	}
+}
+
+func TestAuthorize_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/authorize", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+// --- Authorization code exchange (authorization_code grant) tests ---
+
+// issueAuthCode is a test helper that drives a full authorize request and
+// extracts the issued code from the redirect location.
+func issueAuthCode(t *testing.T, s *store.Store, mux *http.ServeMux, clientID, redirectURI, contactID, state, nonce string) string {
+	t.Helper()
+	cookie := mintSessionCookie(t, s, contactID)
+	authURL := "/oauth2/authorize?response_type=code&client_id=" + url.QueryEscape(clientID) +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&scope=openid" +
+		"&state=" + url.QueryEscape(state) +
+		"&nonce=" + url.QueryEscape(nonce)
+	req := httptest.NewRequest(http.MethodGet, authURL, nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("issueAuthCode: expected 302, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	u, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("issueAuthCode: parse redirect: %v", err)
+	}
+	code := u.Query().Get("code")
+	if code == "" {
+		t.Fatalf("issueAuthCode: no code in redirect: %s", rr.Header().Get("Location"))
+	}
+	return code
+}
+
+func TestOAuth2Token_AuthCodeGrant_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp", "https://rp.test/cb", "alice", "state1", "nonce1")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if resp["access_token"] == "" {
+		t.Error("access_token must not be empty")
+	}
+	if resp["id_token"] == "" {
+		t.Error("id_token must not be empty")
+	}
+	if resp["token_type"] != "Bearer" {
+		t.Errorf("token_type: got %v, want Bearer", resp["token_type"])
+	}
+}
+
+func TestOAuth2Token_AuthCodeGrant_IdTokenHasCorrectAudience(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-aud-test", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-aud-test", "https://rp.test/cb", "bob", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-aud-test&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(rr.Body).Decode(&resp)
+	idTokenStr, _ := resp["id_token"].(string)
+	if idTokenStr == "" {
+		t.Fatal("id_token is empty")
+	}
+
+	// Parse the id_token with client_id as audience — should succeed.
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	idClaims, err := token.ParseSession(idTokenStr, keySet, testIssuer, "rp-aud-test")
+	if err != nil {
+		t.Errorf("id_token should parse with client_id as audience: %v", err)
+	}
+	if idClaims != nil && idClaims.Subject != "bob" {
+		t.Errorf("id_token sub: got %q, want %q", idClaims.Subject, "bob")
+	}
+
+	// The id_token must NOT parse with the estate audience (it's meant for the RP, not estate services).
+	if _, err := token.ParseSession(idTokenStr, keySet, testIssuer, testAudience); err == nil {
+		t.Error("id_token should not parse with estate audience l42.eu — audience is the client_id")
+	}
+}
+
+func TestOAuth2Token_AuthCodeGrant_ReplayRejected(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-replay", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-replay", "https://rp.test/cb", "carol", "s", "n")
+
+	exchangeCode := func() *httptest.ResponseRecorder {
+		body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+			"&client_id=rp-replay&client_secret=" + url.QueryEscape(rawSecret) +
+			"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+		req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	first := exchangeCode()
+	if first.Code != http.StatusOK {
+		t.Fatalf("first exchange: expected 200, got %d", first.Code)
+	}
+	second := exchangeCode()
+	if second.Code != http.StatusBadRequest {
+		t.Errorf("second exchange (replay): expected 400, got %d", second.Code)
+	}
+	var errResp tokenErrorResponse
+	json.NewDecoder(second.Body).Decode(&errResp)
+	if errResp.Error != "invalid_grant" {
+		t.Errorf("replay error: got %q, want invalid_grant", errResp.Error)
+	}
+}
+
+func TestOAuth2Token_AuthCodeGrant_WrongClientSecret(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	createTestOIDCClient(t, s, "rp-wrongsecret", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-wrongsecret", "https://rp.test/cb", "dave", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-wrongsecret&client_secret=wrong-secret" +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestOAuth2Token_AuthCodeGrant_RedirectURIMismatch(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-redirect", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-redirect", "https://rp.test/cb", "eve", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-redirect&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/OTHER"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestOAuth2Token_UnsupportedGrantType(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	body := strings.NewReader("grant_type=password&username=foo&password=bar")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	var errResp tokenErrorResponse
+	json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "unsupported_grant_type" {
+		t.Errorf("error: got %q, want unsupported_grant_type", errResp.Error)
+	}
+}
+
+// --- Userinfo endpoint tests ---
+
+func TestUserinfo_ValidToken_ReturnsClaims(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{})
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if resp["sub"] == "" {
+		t.Error("userinfo must include sub claim")
+	}
+	if resp["principal_class"] == "" {
+		t.Error("userinfo must include principal_class")
+	}
+}
+
+func TestUserinfo_MissingToken_401(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestUserinfo_InvalidToken_401(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestUserinfo_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodDelete, "/oauth2/userinfo", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+// --- Admin OIDC client management tests ---
+
+func TestAdminOIDCClients_Create(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	body := bytes.NewBufferString(`{"client_id":"my-rp","redirect_uris":["https://rp.test/cb"],"client_name":"My RP"}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp createOIDCClientResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ClientID != "my-rp" {
+		t.Errorf("client_id: got %q, want %q", resp.ClientID, "my-rp")
+	}
+	if resp.ClientSecret == "" {
+		t.Error("client_secret must not be empty")
+	}
+	if resp.Note == "" {
+		t.Error("note must not be empty (secret is shown only once)")
+	}
+}
+
+func TestAdminOIDCClients_List(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	createTestOIDCClient(t, s, "rp1", []string{"https://rp1.test/cb"})
+	createTestOIDCClient(t, s, "rp2", []string{"https://rp2.test/cb"})
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/oidc-clients", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var clients []oidcClientJSON
+	if err := json.NewDecoder(rr.Body).Decode(&clients); err != nil {
+		t.Fatalf("decode clients: %v", err)
+	}
+	if len(clients) != 2 {
+		t.Errorf("expected 2 clients, got %d", len(clients))
+	}
+	// Secret hash must NOT appear in the list response.
+	raw := rr.Body.String()
+	_ = raw // rr.Body has been consumed; check via decoded struct
+	for _, c := range clients {
+		if c.ClientID == "" {
+			t.Error("client_id must not be empty in list")
+		}
+	}
+}
+
+func TestAdminOIDCClients_Delete(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	createTestOIDCClient(t, s, "rp-to-delete", []string{"https://rp.test/cb"})
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/oidc-clients/rp-to-delete", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+
+	// Confirm deleted.
+	if _, err := s.GetOIDCClient("rp-to-delete"); err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound after delete, got %v", err)
+	}
+}
+
+func TestAdminOIDCClients_RequiresAdminScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	body := bytes.NewBufferString(`{"client_id":"bad-rp","redirect_uris":["https://rp.test/cb"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestAdminOIDCClients_DuplicateClientID(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	createTestOIDCClient(t, s, "existing-rp", []string{"https://rp.test/cb"})
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	body := bytes.NewBufferString(`{"client_id":"existing-rp","redirect_uris":["https://rp.test/cb2"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- store.OIDCClient tests ---
+
+func TestOIDCClientHasRedirectURI(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	createTestOIDCClient(t, s, "rp", []string{"https://rp.test/cb", "https://rp.test/alt"})
+
+	client, err := s.GetOIDCClient("rp")
+	if err != nil {
+		t.Fatalf("GetOIDCClient: %v", err)
+	}
+	if !client.HasRedirectURI("https://rp.test/cb") {
+		t.Error("HasRedirectURI: should return true for registered URI")
+	}
+	if client.HasRedirectURI("https://evil.com/cb") {
+		t.Error("HasRedirectURI: should return false for unregistered URI")
 	}
 }

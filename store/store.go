@@ -189,6 +189,33 @@ func (s *Store) migrate() error {
 			expires_at  DATETIME NOT NULL,
 			used_at     DATETIME
 		)`,
+		// oidc_clients stores registered OIDC relying parties per ADR-0001 §1.
+		// client_id is a human-readable slug chosen by the admin at registration.
+		// secret_hash is SHA-256(rawSecret) hex; the raw secret is returned once
+		// at registration and never persisted.
+		// redirect_uris is a JSON array of allowed redirect URIs.
+		`CREATE TABLE IF NOT EXISTS oidc_clients (
+			id            TEXT PRIMARY KEY,
+			secret_hash   TEXT NOT NULL,
+			redirect_uris TEXT NOT NULL,
+			client_name   TEXT NOT NULL DEFAULT '',
+			created_at    DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
+		// oidc_auth_codes stores single-use authorization codes issued by the
+		// authorization endpoint. The raw code is returned to the client; only
+		// SHA-256(rawCode) is stored here. Codes expire after 5 minutes and are
+		// consumed (used_at set) on first use — any replay returns ErrAuthCodeUsed.
+		`CREATE TABLE IF NOT EXISTS oidc_auth_codes (
+			code_hash    TEXT PRIMARY KEY,
+			client_id    TEXT NOT NULL,
+			principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+			redirect_uri TEXT NOT NULL,
+			scope        TEXT NOT NULL DEFAULT '',
+			nonce        TEXT NOT NULL DEFAULT '',
+			expires_at   DATETIME NOT NULL,
+			created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+			used_at      DATETIME
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

@@ -629,6 +629,9 @@ func main() {
 		return s.ListVerificationKeys(token.VerificationWindow)
 	}))
 
+	// OIDC discovery document (ADR §1).
+	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(issuer))
+
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
 
@@ -636,8 +639,10 @@ func main() {
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
 
-	// OAuth2 client-credentials grant for machine/agent principals (ADR §5).
-	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, issuer, environment))
+	// OAuth2/OIDC endpoints (ADR §1, §5).
+	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment))
+	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
 	// Admin enrolment surface (all gated on aithne:admin scope).
 	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))
@@ -645,6 +650,8 @@ func main() {
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, issuer, handleAdminMachineKeys(s)))
+	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
+	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, issuer, handleRotateSigningKey(s)))
 
 	// Invitee enrolment flow — invite-gated, no auth required.
