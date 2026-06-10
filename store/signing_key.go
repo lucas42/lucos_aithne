@@ -214,6 +214,66 @@ func decryptKeyDER(kek [32]byte, blob []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
+// MigrateSigningKeyEncryption detects any signing keys stored in the legacy
+// unencrypted PKCS8 DER format and re-encrypts them in-place using the
+// store's KEK. Call once at startup, before any other signing-key operations.
+//
+// Background: prior to this function the signing_keys table stored raw PKCS8
+// DER bytes. Any existing rows written before AES-GCM encryption was added
+// will fail the normal decrypt path. This function migrates those rows
+// transparently so the service can continue to use existing keys rather than
+// discarding them (which would immediately invalidate any in-flight tokens).
+//
+// Returns the number of rows that were migrated (0 on a fresh or already-
+// migrated database).
+func (s *Store) MigrateSigningKeyEncryption() (int, error) {
+	rows, err := s.db.Query(`SELECT id, private_key FROM signing_keys`)
+	if err != nil {
+		return 0, fmt.Errorf("store: migrate signing key encryption: query: %w", err)
+	}
+	defer rows.Close()
+
+	type entry struct {
+		id  string
+		raw []byte
+	}
+	var toMigrate []entry
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return 0, fmt.Errorf("store: migrate signing key encryption: scan: %w", err)
+		}
+		// Try to decrypt with the KEK first. If it succeeds the key is already
+		// in the encrypted format — nothing to do.
+		if _, err := decryptKeyDER(s.kek, blob); err == nil {
+			continue
+		}
+		// Decryption failed. Check whether the blob is a raw PKCS8 DER (legacy
+		// unencrypted format). If so, queue it for re-encryption.
+		if _, err := x509.ParsePKCS8PrivateKey(blob); err != nil {
+			return 0, fmt.Errorf("store: migrate signing key encryption: key %q is neither AES-GCM ciphertext nor valid PKCS8 DER — database may be corrupt: %w", id, err)
+		}
+		toMigrate = append(toMigrate, entry{id: id, raw: blob})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: migrate signing key encryption: iterate: %w", err)
+	}
+	// Close rows before issuing UPDATEs (single-connection SQLite).
+	rows.Close()
+
+	for _, e := range toMigrate {
+		encrypted, err := encryptKeyDER(s.kek, e.raw)
+		if err != nil {
+			return 0, fmt.Errorf("store: migrate signing key encryption: encrypt key %q: %w", e.id, err)
+		}
+		if _, err := s.db.Exec(`UPDATE signing_keys SET private_key = ? WHERE id = ?`, encrypted, e.id); err != nil {
+			return 0, fmt.Errorf("store: migrate signing key encryption: update key %q: %w", e.id, err)
+		}
+	}
+	return len(toMigrate), nil
+}
+
 // --- Internal scan helpers ---
 
 func scanSigningKey(row *sql.Row, kek [32]byte) (*SigningKey, error) {

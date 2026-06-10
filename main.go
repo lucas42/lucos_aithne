@@ -560,6 +560,18 @@ func main() {
 	defer s.Close()
 	log.Printf("Principal/credential store ready at %s", dbPath)
 
+	// Migrate any signing keys stored in the legacy unencrypted PKCS8 DER format
+	// to AES-256-GCM ciphertext. No-op on a fresh DB or after the first post-upgrade
+	// startup. Must run before GetOrCreateActiveSigningKey, which would otherwise
+	// fail to decrypt legacy rows.
+	migrated, err := s.MigrateSigningKeyEncryption()
+	if err != nil {
+		log.Fatalf("Failed to migrate signing key encryption: %v", err)
+	}
+	if migrated > 0 {
+		log.Printf("Migrated %d signing key(s) from legacy plaintext to AES-256-GCM encryption", migrated)
+	}
+
 	// Ensure an active signing key exists before we start serving.
 	// On first boot this generates a fresh ES256 key; on subsequent boots it
 	// reuses the persisted key from the SQLite store.
