@@ -36,6 +36,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -71,8 +72,8 @@ type contactInfo struct {
 // Returns ErrNotFound (from store) if the contact does not exist (404).
 // Returns an error for any other non-200 status.
 func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
-	url := fmt.Sprintf("%s/agents/%s", c.origin, contactID)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	reqURL := fmt.Sprintf("%s/agents/%s", c.origin, url.PathEscape(contactID))
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("contacts: build request: %w", err)
 	}

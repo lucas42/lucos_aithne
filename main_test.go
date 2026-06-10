@@ -812,6 +812,42 @@ func TestAdminInvites_MissingContactID(t *testing.T) {
 	}
 }
 
+// --- Contacts client tests ---
+
+// TestContactsClient_PathEscapesContactID verifies that special characters in
+// contact_id are percent-encoded in the outgoing request path so they are
+// treated as part of the path segment and not as path separators or other
+// URL-structural characters.
+func TestContactsClient_PathEscapesContactID(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RawPath
+		if gotPath == "" {
+			gotPath = r.URL.Path // RawPath is only set when encoding differs from Path
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Test User"}`)
+	}))
+	defer srv.Close()
+
+	c := newContactsClient(srv.URL, "test-key")
+
+	// A contact_id containing a slash and a space — both need escaping.
+	contactID := "org/alice smith"
+	info, err := c.Get(contactID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.DisplayName != "Test User" {
+		t.Errorf("DisplayName: got %q, want %q", info.DisplayName, "Test User")
+	}
+
+	want := "/agents/org%2Falice%20smith"
+	if gotPath != want {
+		t.Errorf("request path: got %q, want %q", gotPath, want)
+	}
+}
+
 // --- Store invite tests ---
 
 func TestStore_CreateAndGetInvite(t *testing.T) {
