@@ -229,6 +229,79 @@ func JWKSHandler(getKeys func() ([]*store.SigningKey, error)) http.HandlerFunc {
 	}
 }
 
+// MintIDToken creates an OIDC ID token for the authorization-code flow.
+// The ID token is a signed JWT with OIDC Core 1.0 required claims:
+//   - iss: issuer (APP_ORIGIN)
+//   - sub: subject (principal's external identity)
+//   - aud: clientID (the relying party — NOT the estate-wide "l42.eu")
+//   - exp, iat
+//   - nonce: forwarded from the authorization request (empty string if not provided)
+//
+// It is signed with the same key as session tokens (ES256) and carries the
+// principal class so the RP can distinguish human from agent subjects.
+// The ID token is separate from the access token — the access token uses
+// audience "l42.eu" for estate-wide verification; the ID token uses the client_id.
+func MintIDToken(
+	p *store.Principal,
+	clientID string,
+	nonce string,
+	signingKey *store.SigningKey,
+	issuer string,
+	ttl time.Duration,
+) (string, error) {
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+
+	privKeyRaw, err := x509.ParsePKCS8PrivateKey(signingKey.PrivateKey)
+	if err != nil {
+		return "", fmt.Errorf("token: parse signing key for id_token: %w", err)
+	}
+	privKey, ok := privKeyRaw.(*ecdsa.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("token: expected *ecdsa.PrivateKey for id_token, got %T", privKeyRaw)
+	}
+
+	jwkKey, err := jwk.FromRaw(privKey)
+	if err != nil {
+		return "", fmt.Errorf("token: build JWK for id_token: %w", err)
+	}
+	if err := jwkKey.Set(jwk.KeyIDKey, signingKey.ID); err != nil {
+		return "", fmt.Errorf("token: set kid for id_token: %w", err)
+	}
+	if err := jwkKey.Set(jwk.AlgorithmKey, jwa.ES256); err != nil {
+		return "", fmt.Errorf("token: set alg for id_token: %w", err)
+	}
+
+	now := time.Now().UTC()
+	jti := uuid.New().String()
+
+	builder := jwt.NewBuilder().
+		Issuer(issuer).
+		Subject(string(p.ExternalID)).
+		Audience([]string{clientID}).
+		IssuedAt(now).
+		Expiration(now.Add(ttl)).
+		JwtID(jti).
+		Claim(ClaimPrincipalClass, string(p.Class))
+
+	// Embed nonce if provided — required for replay protection when the RP
+	// supplied it in the authorization request (OIDC Core §3.1.3.7).
+	if nonce != "" {
+		builder = builder.Claim("nonce", nonce)
+	}
+
+	tok, err := builder.Build()
+	if err != nil {
+		return "", fmt.Errorf("token: build id_token: %w", err)
+	}
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.ES256, jwkKey))
+	if err != nil {
+		return "", fmt.Errorf("token: sign id_token: %w", err)
+	}
+	return string(signed), nil
+}
+
 // SetSessionCookie sets a session cookie containing tokenStr on the response.
 // The cookie is scoped to l42.eu (without the leading dot — RFC 6265 makes the
 // leading dot optional and Go's http.Cookie drops it on serialisation) so it is

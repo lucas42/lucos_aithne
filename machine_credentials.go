@@ -78,10 +78,11 @@ func writeTokenError(w http.ResponseWriter, status int, errCode, description str
 	})
 }
 
-// handleClientCredentials serves POST /oauth2/token.
-// It implements the OAuth2 client-credentials grant (RFC 6749 §4.4) for
-// agent principals holding a machine_key credential.
-func handleClientCredentials(s *store.Store, issuer, environment string) http.HandlerFunc {
+// handleOAuth2Token serves POST /oauth2/token.
+// It dispatches between the supported grant types:
+//   - client_credentials (RFC 6749 §4.4): agent/machine principals via machine_key
+//   - authorization_code (RFC 6749 §4.1): human principals via OIDC authorization flow
+func handleOAuth2Token(s *store.Store, issuer, environment string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -94,89 +95,120 @@ func handleClientCredentials(s *store.Store, issuer, environment string) http.Ha
 		}
 
 		grantType := r.FormValue("grant_type")
+		switch grantType {
+		case "client_credentials":
+			handleClientCredentialsGrant(s, issuer, environment, w, r)
+		case "authorization_code":
+			handleAuthCodeGrant(s, issuer, environment, w, r)
+		default:
+			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
+				fmt.Sprintf("unsupported grant_type %q; supported: client_credentials, authorization_code", grantType))
+		}
+	}
+}
+
+// handleClientCredentials wraps handleClientCredentialsGrant as an http.HandlerFunc,
+// enforcing POST method and grant_type=client_credentials before delegating.
+// Retained for use in tests that exercise the client_credentials path directly.
+func handleClientCredentials(s *store.Store, issuer, environment string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			writeTokenError(w, http.StatusBadRequest, "invalid_request", "could not parse form body")
+			return
+		}
+		grantType := r.FormValue("grant_type")
 		if grantType != "client_credentials" {
 			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
 				fmt.Sprintf("unsupported grant_type %q; only client_credentials is supported", grantType))
 			return
 		}
-
-		clientID := r.FormValue("client_id")
-		clientSecret := r.FormValue("client_secret")
-		if clientID == "" || clientSecret == "" {
-			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
-				"client_id and client_secret are required")
-			return
-		}
-
-		// Look up the agent principal by slug. Call GetPrincipalByExternalID first
-		// to distinguish "unknown client" from "no machine_key credential" — both
-		// return invalid_client to the caller (no information leak) but the
-		// distinction avoids the ghost-principal ambiguity noted by lucos-security.
-		principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, clientID)
-		if err != nil {
-			// ErrNotFound or any other error: do not reveal which case it is.
-			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
-				"invalid client_id or client_secret")
-			return
-		}
-
-		// List machine_key credentials and look for a hash match.
-		creds, err := s.ListCredentialsByPrincipal(principal.ID)
-		if err != nil {
-			log.Printf("handleClientCredentials: list credentials for %s: %v", principal.ID, err)
-			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
-			return
-		}
-
-		secretHash := hashMachineKey(clientSecret)
-		var matched bool
-		for _, c := range creds {
-			if c.Type != store.CredentialTypeMachineKey {
-				continue
-			}
-			if string(c.Data) == secretHash {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			writeTokenError(w, http.StatusUnauthorized, "invalid_client",
-				"invalid client_id or client_secret")
-			return
-		}
-
-		// Collect active scopes for this principal in the current environment.
-		scopes, err := s.GetActiveScopes(principal.ID, environment)
-		if err != nil {
-			log.Printf("handleClientCredentials: get scopes for %s: %v", principal.ID, err)
-			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
-			return
-		}
-
-		// Obtain the active signing key.
-		signingKey, err := s.GetOrCreateActiveSigningKey()
-		if err != nil {
-			log.Printf("handleClientCredentials: get signing key: %v", err)
-			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
-			return
-		}
-
-		// Mint a short-lived session JWT — identical format to the human login path.
-		tokenStr, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
-		if err != nil {
-			log.Printf("handleClientCredentials: mint session: %v", err)
-			writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(tokenSuccessResponse{
-			AccessToken: tokenStr,
-			TokenType:   "Bearer",
-			ExpiresIn:   int(token.DefaultSessionTTL.Seconds()),
-		})
+		handleClientCredentialsGrant(s, issuer, environment, w, r)
 	}
+}
+
+// handleClientCredentialsGrant implements the client_credentials grant.
+// Called after grant_type has been confirmed; r.ParseForm() must have run.
+func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w http.ResponseWriter, r *http.Request) {
+	clientID := r.FormValue("client_id")
+	clientSecret := r.FormValue("client_secret")
+	if clientID == "" || clientSecret == "" {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+			"client_id and client_secret are required")
+		return
+	}
+
+	// Look up the agent principal by slug. Call GetPrincipalByExternalID first
+	// to distinguish "unknown client" from "no machine_key credential" — both
+	// return invalid_client to the caller (no information leak) but the
+	// distinction avoids the ghost-principal ambiguity noted by lucos-security.
+	principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, clientID)
+	if err != nil {
+		// ErrNotFound or any other error: do not reveal which case it is.
+		writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+			"invalid client_id or client_secret")
+		return
+	}
+
+	// List machine_key credentials and look for a hash match.
+	creds, err := s.ListCredentialsByPrincipal(principal.ID)
+	if err != nil {
+		log.Printf("handleClientCredentialsGrant: list credentials for %s: %v", principal.ID, err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+		return
+	}
+
+	secretHash := hashMachineKey(clientSecret)
+	var matched bool
+	for _, c := range creds {
+		if c.Type != store.CredentialTypeMachineKey {
+			continue
+		}
+		if string(c.Data) == secretHash {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		writeTokenError(w, http.StatusUnauthorized, "invalid_client",
+			"invalid client_id or client_secret")
+		return
+	}
+
+	// Collect active scopes for this principal in the current environment.
+	scopes, err := s.GetActiveScopes(principal.ID, environment)
+	if err != nil {
+		log.Printf("handleClientCredentialsGrant: get scopes for %s: %v", principal.ID, err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+		return
+	}
+
+	// Obtain the active signing key.
+	signingKey, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		log.Printf("handleClientCredentialsGrant: get signing key: %v", err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+		return
+	}
+
+	// Mint a short-lived session JWT — identical format to the human login path.
+	tokenStr, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
+	if err != nil {
+		log.Printf("handleClientCredentialsGrant: mint session: %v", err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(tokenSuccessResponse{
+		AccessToken: tokenStr,
+		TokenType:   "Bearer",
+		ExpiresIn:   int(token.DefaultSessionTTL.Seconds()),
+	})
 }
 
 // --- Admin machine-key provisioning endpoint ---
