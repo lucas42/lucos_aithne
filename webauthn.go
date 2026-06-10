@@ -186,7 +186,12 @@ func handleRegisterBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonySto
 
 		// Load all existing credentials to exclude them from the new registration
 		// (prevents registering the same authenticator twice).
-		existingCreds, _ := s.ListCredentialsByPrincipal(p.ID)
+		existingCreds, err := s.ListCredentialsByPrincipal(p.ID)
+		if err != nil {
+			log.Printf("register/begin: list credentials %q: %v", req.ContactID, err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		var excludeList []gwebauthn.Credential
 		for _, c := range existingCreds {
 			if c.Type != store.CredentialTypeWebAuthn {
@@ -260,7 +265,7 @@ func handleRegisterFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonySt
 		credential, err := wa.FinishRegistration(user, *sessionData, r)
 		if err != nil {
 			log.Printf("register/finish: FinishRegistration %q: %v", contactID, err)
-			http.Error(w, "400 Bad Request — registration verification failed: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "400 Bad Request — registration verification failed", http.StatusBadRequest)
 			return
 		}
 
