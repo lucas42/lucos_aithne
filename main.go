@@ -6,10 +6,13 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
 	"log"
@@ -610,6 +613,70 @@ func serveStaticFile(fsys fs.FS, path string) http.HandlerFunc {
 	}
 }
 
+// secureHeaders wraps an HTTP handler and adds standard defence-in-depth
+// security headers to every response. See issue #66 for the rationale.
+// Handlers that need a Content-Security-Policy (e.g. handleLoginPage) set it
+// themselves after the global headers have been applied by this wrapper.
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// generateNonce returns a 16-byte cryptographically random value encoded as
+// base64url (no padding). Uses RawURLEncoding to avoid characters (+, /, =)
+// that html/template would HTML-escape in attribute values, which would
+// break the CSP nonce check in the browser.
+func generateNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// loginPageData holds the per-request data injected into templates/login.html.
+type loginPageData struct {
+	Nonce string
+}
+
+// handleLoginPage serves the login page as a Go template, injecting a fresh
+// per-request nonce into the <script> and <style> tags so the Content-Security-
+// Policy can be locked to 'nonce-{nonce}' without requiring hashes or 'unsafe-inline'.
+func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(tmplFS, "templates/login.html"))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nonce, err := generateNonce()
+		if err != nil {
+			log.Printf("handleLoginPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		csp := strings.Join([]string{
+			"default-src 'none'",
+			"script-src 'nonce-" + nonce + "'",
+			"style-src 'nonce-" + nonce + "'",
+			"img-src 'self'",
+			"connect-src 'self'",
+			"form-action 'self'",
+			"base-uri 'none'",
+			"frame-ancestors 'none'",
+		}, "; ")
+		w.Header().Set("Content-Security-Policy", csp)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, loginPageData{Nonce: nonce}); err != nil {
+			log.Printf("handleLoginPage: render: %v", err)
+		}
+	}
+}
+
 func main() {
 	port := getEnvRequired("PORT")
 
@@ -731,7 +798,7 @@ func main() {
 	mux.HandleFunc("/favicon.ico", serveStaticFile(staticFS, "static/favicon.svg"))
 
 	// Passkey login page (HTML).
-	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
+	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
 
 	// WebAuthn login ceremony endpoints.
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
@@ -759,7 +826,7 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting lucos_aithne — system=%s, environment=%s, listening on %s", system, environment, addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, secureHeaders(mux)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
