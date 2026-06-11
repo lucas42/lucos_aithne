@@ -201,8 +201,10 @@
         if (!beginResp.ok) {
           if (beginResp.status === 401) {
             showError('This invite link is no longer valid. Please ask the administrator to send a new one.');
+          } else if (beginResp.status >= 500) {
+            showError('Server error. Try again in a moment, or contact the administrator.');
           } else {
-            showError('Could not start registration. Try again, or contact the administrator.');
+            showError('Could not start registration (HTTP ' + beginResp.status + '). Contact the administrator.');
           }
           return;
         }
@@ -217,8 +219,16 @@
             showError('Passkey not created — cancelled. Try again when you\'re ready.');
           } else if (err.name === 'InvalidStateError') {
             showError('A passkey for this account already exists on this device.');
+          } else if (err.name === 'NotSupportedError') {
+            showError('This device or browser doesn\'t support passkeys. Try a different device or browser.');
+          } else if (err.name === 'SecurityError') {
+            showError('Passkey creation was blocked by a security policy. Check your browser settings or try a different browser.');
+          } else if (err.name === 'AbortError') {
+            showError('Passkey creation was interrupted. Try again.');
+          } else if (err.name === 'UnknownError') {
+            showError('Your device reported an error it couldn\'t identify. Try a different device or browser.');
           } else {
-            showError('Couldn\'t create passkey. Try a different device, or try again.');
+            showError('Passkey creation failed (' + err.name + '). Try a different device or browser.');
           }
           return;
         }
@@ -231,7 +241,13 @@
           body: JSON.stringify(encodeAttestation(attestation)),
         });
         if (!finishResp.ok) {
-          showError('Registration failed. Try again, or contact the administrator.');
+          if (finishResp.status === 400) {
+            showError('The passkey your device created wasn\'t accepted by the server — this may be a device compatibility issue. Try a different device or browser.');
+          } else if (finishResp.status >= 500) {
+            showError('Server error during registration. Try again in a moment, or contact the administrator.');
+          } else {
+            showError('Registration failed (HTTP ' + finishResp.status + '). Try again, or contact the administrator.');
+          }
           return;
         }
 
