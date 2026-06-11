@@ -726,6 +726,10 @@ func main() {
 	// Index page — serves the root path only (/{$} prevents catch-all matching).
 	mux.HandleFunc("/{$}", serveStaticFile(staticFS, "static/index.html"))
 
+	// Favicon — served from both paths; /favicon.ico handles the legacy automatic browser request.
+	mux.HandleFunc("/favicon.svg", serveStaticFile(staticFS, "static/favicon.svg"))
+	mux.HandleFunc("/favicon.ico", serveStaticFile(staticFS, "static/favicon.svg"))
+
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
 
