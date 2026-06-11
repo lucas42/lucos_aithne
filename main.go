@@ -653,24 +653,12 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		nonce, err := generateNonce()
+		nonce, err := applyPageCSP(w)
 		if err != nil {
 			log.Printf("handleLoginPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		csp := strings.Join([]string{
-			"default-src 'none'",
-			"script-src 'nonce-" + nonce + "'",
-			"style-src 'nonce-" + nonce + "'",
-			"img-src 'self'",
-			"connect-src 'self'",
-			"form-action 'self'",
-			"base-uri 'none'",
-			"frame-ancestors 'none'",
-		}, "; ")
-		w.Header().Set("Content-Security-Policy", csp)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, loginPageData{Nonce: nonce}); err != nil {
 			log.Printf("handleLoginPage: render: %v", err)
 		}
