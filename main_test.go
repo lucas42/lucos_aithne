@@ -843,9 +843,188 @@ func TestContactsClient_PathEscapesContactID(t *testing.T) {
 		t.Errorf("DisplayName: got %q, want %q", info.DisplayName, "Test User")
 	}
 
-	want := "/agents/org%2Falice%20smith"
+	want := "/people/org%2Falice%20smith"
 	if gotPath != want {
 		t.Errorf("request path: got %q, want %q", gotPath, want)
+	}
+}
+
+// TestContactsClient_SendsCorrectHeaders verifies that Get sends the correct
+// Authorization (Bearer) and Accept (application/json) headers so that
+// lucos_contacts authenticates the request and returns JSON rather than HTML.
+func TestContactsClient_SendsCorrectHeaders(t *testing.T) {
+	var (
+		gotAuth   string
+		gotAccept string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Alice"}`)
+	}))
+	defer srv.Close()
+
+	c := newContactsClient(srv.URL, "my-secret-key")
+	if _, err := c.Get("42"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	if gotAuth != "Bearer my-secret-key" {
+		t.Errorf("Authorization header: got %q, want %q", gotAuth, "Bearer my-secret-key")
+	}
+	if gotAccept != "application/json" {
+		t.Errorf("Accept header: got %q, want %q", gotAccept, "application/json")
+	}
+}
+
+// TestContactsClient_404ReturnsNotFound verifies that a 404 from lucos_contacts
+// is mapped to store.ErrNotFound so callers can distinguish missing contacts from
+// service errors.
+func TestContactsClient_404ReturnsNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newContactsClient(srv.URL, "key")
+	_, err := c.Get("99")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected store.ErrNotFound for 404, got %v", err)
+	}
+}
+
+// TestContactsClient_NonOKReturnsError verifies that an unexpected non-200/non-404
+// status code (e.g. 500) is surfaced as an error, not silently ignored.
+func TestContactsClient_NonOKReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newContactsClient(srv.URL, "key")
+	_, err := c.Get("42")
+	if err == nil {
+		t.Error("expected error for 500, got nil")
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		t.Error("500 should not be mapped to ErrNotFound")
+	}
+}
+
+// TestAdminInvites_ContactNotFound verifies that a contact_id that does not exist
+// in lucos_contacts results in a 422 Unprocessable Entity response.
+func TestAdminInvites_ContactNotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// Contacts returns 404 for any request.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
+
+	body, _ := json.Marshal(map[string]string{"contact_id": "99"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 for unknown contact, got %d", rr.Code)
+	}
+}
+
+// TestAdminInvites_ContactsUnavailable verifies that a 5xx response from
+// lucos_contacts results in a 503 Service Unavailable to the caller.
+func TestAdminInvites_ContactsUnavailable(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// Contacts is down.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
+
+	body, _ := json.Marshal(map[string]string{"contact_id": "42"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when contacts unavailable, got %d", rr.Code)
+	}
+}
+
+// TestAdminInvites_Success verifies the full happy path: a known contact_id that
+// exists in lucos_contacts results in a 201 Created with an invite URL.
+func TestAdminInvites_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// Contacts returns a valid response.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":42,"name":"Alice Example","url":"/people/42"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
+
+	body, _ := json.Marshal(map[string]string{"contact_id": "42"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["invite_url"] == "" {
+		t.Error("expected non-empty invite_url in response")
+	}
+	if resp["expires_at"] == "" {
+		t.Error("expected non-empty expires_at in response")
 	}
 }
 
