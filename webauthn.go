@@ -452,6 +452,9 @@ func findAndUpdateSignCount(s *store.Store, user *webAuthnUser, updated *gwebaut
 		// Match by credential ID.
 		if string(wc.ID) == string(updated.ID) {
 			wc.Authenticator.SignCount = updated.Authenticator.SignCount
+			// Propagate updated flags (BackupState can change after initial
+			// registration; BackupEligible should be stable but keep in sync).
+			wc.Flags = updated.Flags
 			newData, err := store.MarshalWebAuthnCredential(wc)
 			if err != nil {
 				return "", nil
