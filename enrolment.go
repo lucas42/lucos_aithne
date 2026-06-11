@@ -2,8 +2,8 @@ package main
 
 // Admin-invite enrolment flow (lucos_aithne#10).
 //
-// templateFS is declared in main.go (via //go:embed templates) and referenced
-// here in renderTemplate — both are in the same package.
+// templateFS and generateNonce are declared in main.go and referenced
+// here — both are in the same package.
 //
 // An admin (aithne:admin scope) generates a single-use invite URL via the
 // admin enrolment page or the POST /admin/invites API. The invitee opens the
@@ -118,11 +118,13 @@ type enrolPageData struct {
 	ContactID   string
 	DisplayName string
 	IsRecovery  bool // true if the principal already has at least one passkey
+	Nonce       string
 }
 
 // enrolErrorPageData is the data passed to templates/enrol_error.html.
 type enrolErrorPageData struct {
 	Reason string // "not_found", "expired", or "used"
+	Nonce  string
 }
 
 // adminEnrolPageData is the data passed to templates/admin_enrol.html.
@@ -131,22 +133,33 @@ type enrolErrorPageData struct {
 // The cookie is HttpOnly, so JS cannot read it from document.cookie.
 type adminEnrolPageData struct {
 	SessionToken string
+	Nonce        string
 }
 
-// renderTemplate parses and executes a named template from the binary, writing
-// the result to w. On error it writes a plain 500 response.
-func renderTemplate(w http.ResponseWriter, name string, data any) {
-	t, err := template.ParseFS(templateFS, "templates/"+name)
+// enrolmentCSP generates a per-request nonce, sets Content-Security-Policy and
+// Content-Type headers on w, and returns the nonce for injection into templates.
+// Returns ("", error) on failure; the caller must write a 500 and return.
+// The CSP mirrors the login page policy: default-src 'none', nonce-gated
+// scripts and styles, img-src 'self' (for the favicon), connect-src and
+// form-action 'self', and base-uri / frame-ancestors 'none'.
+func enrolmentCSP(w http.ResponseWriter) (string, error) {
+	nonce, err := generateNonce()
 	if err != nil {
-		log.Printf("renderTemplate %q: parse: %v", name, err)
-		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-		return
+		return "", err
 	}
+	csp := strings.Join([]string{
+		"default-src 'none'",
+		"script-src 'nonce-" + nonce + "'",
+		"style-src 'nonce-" + nonce + "'",
+		"img-src 'self'",
+		"connect-src 'self'",
+		"form-action 'self'",
+		"base-uri 'none'",
+		"frame-ancestors 'none'",
+	}, "; ")
+	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.Execute(w, data); err != nil {
-		// Headers already sent; log only.
-		log.Printf("renderTemplate %q: execute: %v", name, err)
-	}
+	return nonce, nil
 }
 
 // --- Admin enrolment page ---
@@ -155,13 +168,22 @@ func renderTemplate(w http.ResponseWriter, name string, data any) {
 // requireAdminScopeFromCookie must wrap this handler; it validates the session
 // cookie and injects the raw JWT into ctx via rawTokenContextKey.
 func handleAdminEnrolPage() http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_enrol.html"))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		nonce, err := enrolmentCSP(w)
+		if err != nil {
+			log.Printf("handleAdminEnrolPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
-		renderTemplate(w, "admin_enrol.html", adminEnrolPageData{SessionToken: sessionToken})
+		if err := tmpl.Execute(w, adminEnrolPageData{SessionToken: sessionToken, Nonce: nonce}); err != nil {
+			log.Printf("handleAdminEnrolPage: render: %v", err)
+		}
 	}
 }
 
@@ -253,6 +275,8 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 // It validates the token server-side and renders a personalised enrolment page
 // via a Go template. Invalid/expired/used tokens render a full error page.
 func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc {
+	enrolTmpl := template.Must(template.ParseFS(templateFS, "templates/enrol.html"))
+	errorTmpl := template.Must(template.ParseFS(templateFS, "templates/enrol_error.html"))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -265,17 +289,30 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			return
 		}
 
+		nonce, err := enrolmentCSP(w)
+		if err != nil {
+			log.Printf("handleEnrolPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		renderError := func(reason string) {
+			if err := errorTmpl.Execute(w, enrolErrorPageData{Reason: reason, Nonce: nonce}); err != nil {
+				log.Printf("handleEnrolPage: render error (%s): %v", reason, err)
+			}
+		}
+
 		inv, err := s.GetInviteByRawToken(rawToken)
 		if errors.Is(err, store.ErrNotFound) {
-			renderTemplate(w, "enrol_error.html", enrolErrorPageData{Reason: "not_found"})
+			renderError("not_found")
 			return
 		}
 		if errors.Is(err, store.ErrInviteExpired) {
-			renderTemplate(w, "enrol_error.html", enrolErrorPageData{Reason: "expired"})
+			renderError("expired")
 			return
 		}
 		if errors.Is(err, store.ErrInviteUsed) {
-			renderTemplate(w, "enrol_error.html", enrolErrorPageData{Reason: "used"})
+			renderError("used")
 			return
 		}
 		if err != nil {
@@ -307,12 +344,15 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			}
 		}
 
-		renderTemplate(w, "enrol.html", enrolPageData{
+		if err := enrolTmpl.Execute(w, enrolPageData{
 			Token:       rawToken,
 			ContactID:   inv.ContactID,
 			DisplayName: info.DisplayName,
 			IsRecovery:  isRecovery,
-		})
+			Nonce:       nonce,
+		}); err != nil {
+			log.Printf("handleEnrolPage: render: %v", err)
+		}
 	}
 }
 

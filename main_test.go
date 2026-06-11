@@ -827,6 +827,99 @@ func TestEnrolPage_InvalidToken_RendersErrorPage(t *testing.T) {
 	}
 }
 
+// checkCSPNonce is a test helper that asserts:
+//  1. The Content-Security-Policy header is present and contains a 'nonce-...' directive.
+//  2. The nonce value extracted from the CSP header appears as nonce="..." in body.
+//
+// Returns the extracted nonce value for additional assertions by the caller.
+func checkCSPNonce(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	csp := rr.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing")
+	}
+	if !strings.Contains(csp, "'nonce-") {
+		t.Fatalf("CSP missing nonce directive: %q", csp)
+	}
+	const noncePrefix = "'nonce-"
+	idx := strings.Index(csp, noncePrefix)
+	if idx < 0 {
+		t.Fatalf("could not find nonce in CSP: %q", csp)
+	}
+	end := strings.Index(csp[idx+len(noncePrefix):], "'")
+	if end < 0 {
+		t.Fatalf("malformed nonce in CSP: %q", csp)
+	}
+	nonceVal := csp[idx+len(noncePrefix) : idx+len(noncePrefix)+end]
+	body := rr.Body.String()
+	if !strings.Contains(body, `nonce="`+nonceVal+`"`) {
+		t.Errorf("nonce %q from CSP not found in rendered HTML body", nonceVal)
+	}
+	return nonceVal
+}
+
+func TestEnrolPage_SetsCSP(t *testing.T) {
+	// Verify that GET /enrol?token=<valid> sets a nonce-based CSP and injects the
+	// nonce into the <style> and <script> tags of the enrolment page.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// Start a mock contacts server that returns a valid contact.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Alice"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	rawToken := createValidInvite(t, s, "alice")
+	req := httptest.NewRequest(http.MethodGet, "/enrol?token="+rawToken, nil)
+	rr := httptest.NewRecorder()
+	handleEnrolPage(s, contacts)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	checkCSPNonce(t, rr)
+}
+
+func TestEnrolPage_ErrorPage_SetsCSP(t *testing.T) {
+	// Verify that an invalid-token response (enrol_error.html) also carries a
+	// nonce-based CSP with the nonce injected into the <style> tag.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	contacts := newContactsClient("http://contacts.test", "test-key")
+
+	req := httptest.NewRequest(http.MethodGet, "/enrol?token=nonexistent", nil)
+	rr := httptest.NewRecorder()
+	handleEnrolPage(s, contacts)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 with error HTML, got %d", rr.Code)
+	}
+	checkCSPNonce(t, rr)
+}
+
+func TestAdminEnrolPage_SetsCSP(t *testing.T) {
+	// Verify that GET /admin/enrol sets a nonce-based CSP and injects the nonce
+	// into the <style> and <script> tags. Auth wrapping is bypassed — the test
+	// exercises the inner handler directly, mirroring TestLoginPage_SetsCSP.
+	req := httptest.NewRequest(http.MethodGet, "/admin/enrol", nil)
+	rr := httptest.NewRecorder()
+	handleAdminEnrolPage()(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	checkCSPNonce(t, rr)
+}
+
 // --- Admin invites tests ---
 
 func TestAdminInvites_RejectsNoToken(t *testing.T) {
