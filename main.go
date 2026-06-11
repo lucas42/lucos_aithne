@@ -661,6 +661,7 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 			"default-src 'none'",
 			"script-src 'nonce-" + nonce + "'",
 			"style-src 'nonce-" + nonce + "'",
+			"img-src 'self'",
 			"connect-src 'self'",
 			"form-action 'self'",
 			"base-uri 'none'",
