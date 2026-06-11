@@ -208,6 +208,8 @@ func TestDeriveRPID(t *testing.T) {
 		{"bare l42.eu", "https://l42.eu", "l42.eu"},
 		{"localhost with port", "http://localhost:8039", "localhost"},
 		{"localhost no port", "http://localhost", "localhost"},
+		{"invalid URL", "not a url \n", "l42.eu"},
+		{"no hostname (relative path)", "/relative/path", "l42.eu"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
