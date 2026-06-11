@@ -506,10 +506,10 @@ func TestJWKSEndpoint_Wired(t *testing.T) {
 
 // --- Static file handler tests ---
 
-func TestServeStaticFile_LoginPage(t *testing.T) {
+func TestLoginPage_ServesHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
 	rr := httptest.NewRecorder()
-	serveStaticFile(staticFS, "static/login.html")(rr, req)
+	handleLoginPage(templateFS)(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET /auth/login: expected 200, got %d", rr.Code)
 	}
@@ -521,12 +521,70 @@ func TestServeStaticFile_LoginPage(t *testing.T) {
 	}
 }
 
-func TestServeStaticFile_RejectsPost(t *testing.T) {
+func TestLoginPage_RejectsPost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", nil)
 	rr := httptest.NewRecorder()
-	serveStaticFile(staticFS, "static/login.html")(rr, req)
+	handleLoginPage(templateFS)(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /auth/login: expected 405, got %d", rr.Code)
+	}
+}
+
+func TestLoginPage_SetsCSP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	rr := httptest.NewRecorder()
+	handleLoginPage(templateFS)(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /auth/login: expected 200, got %d", rr.Code)
+	}
+	csp := rr.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on login page")
+	}
+	// CSP must contain a nonce directive (not 'unsafe-inline').
+	if !strings.Contains(csp, "'nonce-") {
+		t.Errorf("CSP missing nonce directive: %q", csp)
+	}
+	// The nonce in the CSP must match the one injected into the script tag.
+	// Extract the nonce value from the CSP header.
+	const noncePrefix = "'nonce-"
+	idx := strings.Index(csp, noncePrefix)
+	if idx < 0 {
+		t.Fatalf("could not find nonce in CSP: %q", csp)
+	}
+	end := strings.Index(csp[idx+len(noncePrefix):], "'")
+	if end < 0 {
+		t.Fatalf("malformed nonce in CSP: %q", csp)
+	}
+	nonceVal := csp[idx+len(noncePrefix) : idx+len(noncePrefix)+end]
+	body := rr.Body.String()
+	if !strings.Contains(body, `nonce="`+nonceVal+`"`) {
+		t.Errorf("nonce %q from CSP not found in rendered HTML body", nonceVal)
+	}
+}
+
+func TestSecureHeaders_Present(t *testing.T) {
+	// secureHeaders must add X-Frame-Options, X-Content-Type-Options, and
+	// Referrer-Policy to every response, regardless of the underlying handler.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/_info", nil)
+	rr := httptest.NewRecorder()
+	secureHeaders(inner).ServeHTTP(rr, req)
+
+	checks := []struct {
+		header string
+		want   string
+	}{
+		{"X-Frame-Options", "DENY"},
+		{"X-Content-Type-Options", "nosniff"},
+		{"Referrer-Policy", "strict-origin-when-cross-origin"},
+	}
+	for _, c := range checks {
+		if got := rr.Header().Get(c.header); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.header, got, c.want)
+		}
 	}
 }
 
