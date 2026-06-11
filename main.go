@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -665,6 +666,33 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 	}
 }
 
+// deriveRPID determines the WebAuthn RP ID from the APP_ORIGIN URL.
+//
+// In production (APP_ORIGIN = "https://aithne.l42.eu") the RP ID is set to
+// the registrable parent "l42.eu" per ADR-0001 §2, so passkeys are valid on
+// any *.l42.eu origin without re-enrolment.
+//
+// In development (APP_ORIGIN = "http://localhost:PORT") the RP ID must be
+// "localhost" — the WebAuthn spec requires the RP ID to equal the effective
+// domain of the origin or a registrable suffix of it. "l42.eu" is not a
+// suffix of "localhost", which is why Chrome blocks passkey creation with
+// "blocked by a security policy" when the RP ID is hardcoded.
+func deriveRPID(appOrigin string) string {
+	u, err := url.Parse(appOrigin)
+	if err != nil || u.Hostname() == "" {
+		return "l42.eu" // safe production default
+	}
+	host := u.Hostname()
+	// Use the registrable parent domain for any *.l42.eu origin (or l42.eu
+	// itself) so passkeys registered on aithne.l42.eu remain valid if the
+	// login origin moves to another subdomain.
+	if host == "l42.eu" || strings.HasSuffix(host, ".l42.eu") {
+		return "l42.eu"
+	}
+	// For any other origin (e.g. localhost), use the hostname directly.
+	return host
+}
+
 func main() {
 	port := getEnvRequired("PORT")
 
@@ -756,11 +784,11 @@ func main() {
 	contacts := newContactsClient(contactsOrigin, contactsKey)
 
 	// Initialise the WebAuthn relying party.
-	// RP ID = l42.eu (registrable parent domain per ADR-0001 §2): passkeys
-	// registered here are valid on any service under *.l42.eu, so moving the
-	// login origin to a different subdomain does not invalidate existing keys.
+	// RP ID is derived from APP_ORIGIN (see deriveRPID): "l42.eu" for any
+	// *.l42.eu production origin (ADR-0001 §2 — passkeys valid estate-wide),
+	// or the raw hostname (e.g. "localhost") for development environments.
 	wa, err := gwebauthn.New(&gwebauthn.Config{
-		RPID:          "l42.eu",
+		RPID:          deriveRPID(issuer),
 		RPDisplayName: "lucOS",
 		RPOrigins:     []string{issuer},
 	})
