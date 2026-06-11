@@ -195,6 +195,30 @@ func TestParseScopesYAML_EmptyReturnsError(t *testing.T) {
 	}
 }
 
+// --- deriveRPID tests ---
+
+func TestDeriveRPID(t *testing.T) {
+	tests := []struct {
+		name      string
+		appOrigin string
+		want      string
+	}{
+		{"production subdomain", "https://aithne.l42.eu", "l42.eu"},
+		{"other l42.eu subdomain", "https://auth.l42.eu", "l42.eu"},
+		{"bare l42.eu", "https://l42.eu", "l42.eu"},
+		{"localhost with port", "http://localhost:8039", "localhost"},
+		{"localhost no port", "http://localhost", "localhost"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveRPID(tt.appOrigin)
+			if got != tt.want {
+				t.Errorf("deriveRPID(%q) = %q; want %q", tt.appOrigin, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- Admin endpoint auth tests ---
 
 func TestAdminGrants_RejectsNoToken(t *testing.T) {
