@@ -29,6 +29,16 @@ type WebAuthnCredentialData struct {
 	// Transports carries the authenticator's reported transport hints (usb, nfc,
 	// ble, internal, etc.) and is optional — absent for legacy registrations.
 	Transports []string `json:"transports,omitempty"`
+	// BackupEligible and BackupState mirror the FIDO2 BE and BS authenticator
+	// data flags recorded at registration time. BackupEligible must be
+	// persisted because the go-webauthn library enforces that it cannot change
+	// between registration and login (if it changes, login is rejected with
+	// "Backup Eligible flag inconsistency detected during login validation").
+	// BackupState is persisted for completeness — it can change (a credential
+	// can be backed up after initial registration) and keeping it current
+	// avoids stale state in the store.
+	BackupEligible bool `json:"backup_eligible"`
+	BackupState    bool `json:"backup_state"`
 }
 
 // MarshalWebAuthnCredential serialises a webauthn.Credential into the store
@@ -51,11 +61,13 @@ func MarshalWebAuthnCredential(c *webauthn.Credential) ([]byte, error) {
 	}
 
 	d := WebAuthnCredentialData{
-		CredentialID: c.ID,
-		PublicKey:    c.PublicKey,
-		SignCount:    c.Authenticator.SignCount,
-		AAGUID:       c.Authenticator.AAGUID,
-		Transports:   transports,
+		CredentialID:   c.ID,
+		PublicKey:      c.PublicKey,
+		SignCount:      c.Authenticator.SignCount,
+		AAGUID:         c.Authenticator.AAGUID,
+		Transports:     transports,
+		BackupEligible: c.Flags.BackupEligible,
+		BackupState:    c.Flags.BackupState,
 	}
 	return json.Marshal(d)
 }
@@ -83,6 +95,10 @@ func UnmarshalWebAuthnCredential(data []byte) (*webauthn.Credential, error) {
 		Authenticator: webauthn.Authenticator{
 			AAGUID:    d.AAGUID,
 			SignCount: d.SignCount,
+		},
+		Flags: webauthn.CredentialFlags{
+			BackupEligible: d.BackupEligible,
+			BackupState:    d.BackupState,
 		},
 	}
 	for _, t := range d.Transports {
