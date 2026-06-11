@@ -627,13 +627,15 @@ func secureHeaders(next http.Handler) http.Handler {
 }
 
 // generateNonce returns a 16-byte cryptographically random value encoded as
-// base64. Used as a per-request nonce for Content-Security-Policy.
+// base64url (no padding). Uses RawURLEncoding to avoid characters (+, /, =)
+// that html/template would HTML-escape in attribute values, which would
+// break the CSP nonce check in the browser.
 func generateNonce() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(b), nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // loginPageData holds the per-request data injected into templates/login.html.
