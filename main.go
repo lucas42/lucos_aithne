@@ -723,6 +723,9 @@ func main() {
 	// OIDC discovery document (ADR §1).
 	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(issuer))
 
+	// Index page — serves the root path only (/{$} prevents catch-all matching).
+	mux.HandleFunc("/{$}", serveStaticFile(staticFS, "static/index.html"))
+
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", serveStaticFile(staticFS, "static/login.html"))
 

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aithne — lucOS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a1a;
+    }
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+      width: 100%;
+      max-width: 360px;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    .subtitle { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
+    p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
+    a.action {
+      display: inline-block;
+      padding: .625rem 1.25rem;
+      background: #0066cc;
+      color: #fff;
+      border-radius: 6px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: .9rem;
+    }
+    a.action:hover { background: #0052a3; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>lucOS</h1>
+    <p class="subtitle">Aithne — authentication service</p>
+    <p>Aithne issues passkey-based access tokens to lucOS services. If you have a passkey registered, you can sign in.</p>
+    <a href="/auth/login" class="action">Sign in with passkey →</a>
+  </div>
+</body>
+</html>
