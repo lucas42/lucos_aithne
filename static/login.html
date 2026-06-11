@@ -63,6 +63,12 @@
       margin-top: .75rem;
     }
     .error[hidden] { display: none; }
+    .hint {
+      font-size: .8rem;
+      color: #777;
+      margin-top: -.75rem;
+      margin-bottom: 1rem;
+    }
   </style>
 </head>
 <body>
@@ -70,9 +76,10 @@
     <h1>lucOS</h1>
     <p class="subtitle">Sign in with your passkey</p>
     <form id="loginForm" novalidate>
-      <label for="contactId">Contact ID</label>
+      <label for="contactId">Contact ID (optional)</label>
       <input type="text" id="contactId" name="contact_id"
-             placeholder="e.g. lucas" autocomplete="username webauthn" required>
+             placeholder="e.g. lucas" autocomplete="username webauthn">
+      <p class="hint" id="contactIdHint">Leave blank to let your browser choose your passkey automatically.</p>
       <button type="submit" id="submitBtn">Sign in with passkey</button>
     </form>
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
@@ -222,18 +229,75 @@
       }
     }
 
+    // ── Discoverable login (button-triggered, no contact ID required) ─────────
+    //
+    // When the user clicks "Sign in with passkey" without entering a Contact ID
+    // the browser presents a picker of all passkeys registered for l42.eu.
+    // The server identifies the principal from the assertion's userHandle
+    // (set at registration time as the internal principal ID).
+
+    async function authenticateDiscoverable() {
+      clearError();
+      setPending(true);
+
+      try {
+        const beginResp = await fetch('/auth/login/begin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contact_id: '' }),
+        });
+        if (!beginResp.ok) {
+          showError('Could not start sign-in. Try again, or come back later.');
+          return;
+        }
+
+        const data = await beginResp.json();
+        const sessionId = data.aithne_session;
+        const publicKey = decodeCredentialRequestOptions(data);
+
+        let assertion;
+        try {
+          assertion = await navigator.credentials.get({ publicKey });
+        } catch (err) {
+          if (err.name === 'NotAllowedError') {
+            showError('Sign-in cancelled. Try again when you\'re ready.');
+          } else {
+            showError('Couldn\'t get passkey. Try a different device, or try again.');
+          }
+          return;
+        }
+
+        const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
+        const finishResp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(encodeAssertion(assertion)),
+        });
+        if (!finishResp.ok) {
+          if (finishResp.status === 403) {
+            showError('Sign-in refused for security reasons. Contact the administrator if this is unexpected.');
+          } else {
+            showError('Passkey verification failed. Try a different device, or try again.');
+          }
+          return;
+        }
+
+        safeRedirect();
+      } catch (_) {
+        showError('Something went wrong. Try again, or come back later.');
+      } finally {
+        setPending(false);
+      }
+    }
+
     // ── Conditional mediation (passkey autofill) ───────────────────────────────
     //
     // Modern browsers (Chrome 108+, Safari 16+, Firefox 119+) will show passkey
     // suggestions in the autofill dropdown when the contact-ID input is focused,
     // driven by autocomplete="username webauthn" on the input element.
     // The conditional request must be started before the user interacts.
-    //
-    // NOTE: this requires the server to accept an empty contact_id on
-    // /auth/login/begin (returning allowCredentials:[]) and to identify the
-    // principal from the userHandle in the assertion on /auth/login/finish
-    // rather than from the contact_id query param. Until that backend change
-    // lands, startConditional() silently does nothing if /begin returns 400.
+    // Uses the same discoverable login backend path as authenticateDiscoverable()
+    // above (empty contact_id → session token → finish by userHandle).
 
     let conditionalAbort = null;
 
@@ -288,9 +352,11 @@
       if (conditionalAbort) { conditionalAbort.abort(); conditionalAbort = null; }
 
       const contactId = document.getElementById('contactId').value.trim();
-      if (!contactId) { showError('Enter your contact ID.'); return; }
-
-      await authenticate(contactId);
+      if (contactId) {
+        await authenticate(contactId);
+      } else {
+        await authenticateDiscoverable();
+      }
     });
 
     startConditional();
