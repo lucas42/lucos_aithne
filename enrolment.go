@@ -136,13 +136,14 @@ type adminEnrolPageData struct {
 	Nonce        string
 }
 
-// enrolmentCSP generates a per-request nonce, sets Content-Security-Policy and
+// applyPageCSP generates a per-request nonce, sets Content-Security-Policy and
 // Content-Type headers on w, and returns the nonce for injection into templates.
 // Returns ("", error) on failure; the caller must write a 500 and return.
-// The CSP mirrors the login page policy: default-src 'none', nonce-gated
-// scripts and styles, img-src 'self' (for the favicon), connect-src and
-// form-action 'self', and base-uri / frame-ancestors 'none'.
-func enrolmentCSP(w http.ResponseWriter) (string, error) {
+// Used by every server-rendered HTML page: login, enrolment, and admin pages
+// all share this single CSP policy so a future directive change is a one-place edit.
+// Policy: default-src 'none', nonce-gated scripts and styles, img-src 'self'
+// (for the favicon), connect-src and form-action 'self', base-uri / frame-ancestors 'none'.
+func applyPageCSP(w http.ResponseWriter) (string, error) {
 	nonce, err := generateNonce()
 	if err != nil {
 		return "", err
@@ -174,7 +175,7 @@ func handleAdminEnrolPage() http.HandlerFunc {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		nonce, err := enrolmentCSP(w)
+		nonce, err := applyPageCSP(w)
 		if err != nil {
 			log.Printf("handleAdminEnrolPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
@@ -289,7 +290,7 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			return
 		}
 
-		nonce, err := enrolmentCSP(w)
+		nonce, err := applyPageCSP(w)
 		if err != nil {
 			log.Printf("handleEnrolPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
