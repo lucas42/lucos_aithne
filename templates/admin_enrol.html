@@ -8,6 +8,15 @@
   <link rel="stylesheet" href="/aithne.css">
   <style nonce="{{.Nonce}}">
     .card { max-width: 420px; }
+    .admin-nav {
+      display: flex; gap: 1rem;
+      font-size: .8rem;
+      margin-bottom: 1.25rem;
+      padding-bottom: .875rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .admin-nav a { color: #555; text-decoration: none; }
+    .admin-nav a:hover { text-decoration: underline; }
     .result {
       margin-top: 1.25rem;
       padding: 1rem;
@@ -46,6 +55,10 @@
 <body>
   <lucos-navbar>lucOS Admin</lucos-navbar>
   <div class="card">
+    <nav class="admin-nav">
+      <a href="/admin/grants">Manage grants</a>
+      <a href="/">← Home</a>
+    </nav>
     <p class="subtitle">Generate a passkey enrolment invite for a contact.</p>
 
     <form id="inviteForm" novalidate>
