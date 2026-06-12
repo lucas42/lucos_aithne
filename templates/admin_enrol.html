@@ -80,9 +80,12 @@
     </nav>
 
     <form id="inviteForm" novalidate>
-      <label for="contactId">Contact ID</label>
-      <input type="text" id="contactId" name="contact_id"
-             placeholder="e.g. 42" autocomplete="off" required>
+      <label for="contactSearch">Contact</label>
+      <input type="text" id="contactSearch"
+             placeholder="Type a name…" autocomplete="off"
+             list="contactsList">
+      <input type="hidden" id="contactId">
+      <datalist id="contactsList"></datalist>
       <button type="submit" id="submitBtn">Generate invite link</button>
     </form>
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
@@ -112,6 +115,9 @@
     const revokeBtn     = document.getElementById('revokeBtn');
     const revokedNotice = document.getElementById('revokedNotice');
     const expiresEl     = document.getElementById('expiresText');
+    const searchInput   = document.getElementById('contactSearch');
+    const contactIdEl   = document.getElementById('contactId');
+    const datalist      = document.getElementById('contactsList');
 
     // Holds the token_hash of the currently displayed invite, for revocation.
     let currentTokenHash = null;
@@ -132,13 +138,43 @@
       btn.textContent = yes ? 'Generating…' : 'Generate invite link';
     }
 
+    // ── Contact name search ──────────────────────────────────────────────────
+    let contactsData = [];
+
+    // Fetch the contact list and populate the <datalist> for name-search.
+    (async function loadContacts() {
+      try {
+        const resp = await fetch('/admin/contacts', {
+          headers: { 'Authorization': 'Bearer ' + sessionToken },
+        });
+        if (!resp.ok) return;
+        contactsData = await resp.json();
+        contactsData.forEach(function(c) {
+          const opt = document.createElement('option');
+          opt.value = c.name;
+          datalist.appendChild(opt);
+        });
+      } catch (_) {
+        // Non-fatal — fall back to accepting a raw ID.
+      }
+    })();
+
+    // Resolve the hidden contact ID whenever the visible input changes.
+    searchInput.addEventListener('change', function() {
+      const match = contactsData.find(function(c) { return c.name === searchInput.value; });
+      contactIdEl.value = match ? match.id : '';
+    });
+
     form.addEventListener('submit', async function(e) {
       e.preventDefault();
       clearError();
       resultBox.hidden = true;
 
-      const contactId = document.getElementById('contactId').value.trim();
-      if (!contactId) { showError('Enter a contact ID.'); return; }
+      // Resolve contact ID: prefer the hidden field set by datalist selection;
+      // fall back to treating the typed text as a raw ID (contacts unavailable).
+      let contactId = contactIdEl.value.trim();
+      if (!contactId) contactId = searchInput.value.trim();
+      if (!contactId) { showError('Enter a contact name or ID.'); searchInput.focus(); return; }
 
       const token = sessionToken;
       setPending(true);
@@ -157,7 +193,7 @@
           if (resp.status === 401 || resp.status === 403) {
             showError('Access denied. Make sure you are signed in with an admin account.');
           } else if (resp.status === 422) {
-            showError('Contact ID not found in lucos_contacts. Check the ID and try again.');
+            showError('Contact not found in lucos_contacts. Check the name or ID and try again.');
           } else {
             showError('Could not generate invite: ' + text.trim());
           }
