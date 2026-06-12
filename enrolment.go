@@ -141,8 +141,9 @@ type adminEnrolPageData struct {
 // Returns ("", error) on failure; the caller must write a 500 and return.
 // Used by every server-rendered HTML page: login, enrolment, and admin pages
 // all share this single CSP policy so a future directive change is a one-place edit.
-// Policy: default-src 'none', nonce-gated scripts and styles, img-src 'self'
-// (for the favicon), connect-src and form-action 'self', base-uri / frame-ancestors 'none'.
+// Policy: default-src 'none', nonce-gated scripts and styles, img-src 'self' data:
+// ('self' for the favicon, data: for SVG data URIs in CSS background-image),
+// connect-src and form-action 'self', base-uri / frame-ancestors 'none'.
 func applyPageCSP(w http.ResponseWriter) (string, error) {
 	nonce, err := generateNonce()
 	if err != nil {
@@ -152,7 +153,7 @@ func applyPageCSP(w http.ResponseWriter) (string, error) {
 		"default-src 'none'",
 		"script-src 'nonce-" + nonce + "'",
 		"style-src 'nonce-" + nonce + "'",
-		"img-src 'self'",
+		"img-src 'self' data:",
 		"connect-src 'self'",
 		"form-action 'self'",
 		"base-uri 'none'",
