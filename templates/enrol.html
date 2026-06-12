@@ -55,7 +55,8 @@
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
     <div class="success" id="successBox" hidden>
       <p>Your passkey is set up.</p>
-      <a href="/auth/login">Sign in →</a>
+      <p id="signingInMsg">Signing you in…</p>
+      <a href="/auth/login" id="signInFallback" hidden>Sign in →</a>
     </div>
   </div>
 
@@ -89,6 +90,68 @@
         },
         transports: resp.getTransports ? resp.getTransports() : [],
       };
+    }
+
+    // ── Post-enrolment auto sign-in ────────────────────────────────────────────
+    //
+    // After creating a passkey the user should be signed in immediately — they
+    // shouldn't have to navigate to /auth/login and click again. These helpers
+    // mirror the discoverable-login path in login.html so we can run the GET
+    // ceremony inline without a page navigation.
+
+    function decodeCredentialRequestOptions(opts) {
+      if (opts.publicKey.challenge) {
+        opts.publicKey.challenge = b64urlToBytes(opts.publicKey.challenge);
+      }
+      if (opts.publicKey.allowCredentials) {
+        opts.publicKey.allowCredentials = opts.publicKey.allowCredentials.map(c => ({
+          ...c,
+          id: b64urlToBytes(c.id),
+        }));
+      }
+      return opts.publicKey;
+    }
+
+    function encodeAssertion(cred) {
+      const resp = cred.response;
+      return {
+        id: cred.id,
+        rawId: bytesToB64url(cred.rawId),
+        type: cred.type,
+        response: {
+          authenticatorData: bytesToB64url(resp.authenticatorData),
+          clientDataJSON:    bytesToB64url(resp.clientDataJSON),
+          signature:         bytesToB64url(resp.signature),
+          userHandle:        resp.userHandle ? bytesToB64url(resp.userHandle) : null,
+        },
+      };
+    }
+
+    // autoSignIn runs the discoverable login ceremony and redirects to / on success.
+    // Throws on any failure so the caller can show the fallback "Sign in →" link.
+    async function autoSignIn() {
+      const beginResp = await fetch('/auth/login/begin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contact_id: '' }),
+      });
+      if (!beginResp.ok) throw new Error('login begin failed');
+
+      const data = await beginResp.json();
+      const sessionId = data.aithne_session;
+      const publicKey = decodeCredentialRequestOptions(data);
+
+      const assertion = await navigator.credentials.get({ publicKey });
+
+      const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
+      const finishResp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(encodeAssertion(assertion)),
+      });
+      if (!finishResp.ok) throw new Error('login finish failed: ' + finishResp.status);
+
+      window.location.href = '/';
     }
 
     const errorBox   = document.getElementById('errorBox');
@@ -180,9 +243,17 @@
           return;
         }
 
-        // Success — hide form, show confirmation with sign-in link.
+        // Success — hide form, show "Signing you in…", attempt auto sign-in.
         form.hidden = true;
         successBox.hidden = false;
+        // Attempt the discoverable login ceremony inline so the user is signed
+        // in immediately without having to navigate to /auth/login and click again.
+        // If it fails for any reason (user gesture expired, browser policy, etc.)
+        // the fallback "Sign in →" link is shown instead.
+        autoSignIn().catch(function() {
+          document.getElementById('signingInMsg').hidden = true;
+          document.getElementById('signInFallback').hidden = false;
+        });
       } catch (_) {
         showError('Something went wrong. Try again, or come back later.');
       } finally {
