@@ -24,12 +24,14 @@ COPY --from=navbar lucos_navbar.js static/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o lucos_aithne .
 
 # Runtime stage: scratch — the binary is fully static (CGO_ENABLED=0) so there are
-# no runtime dependencies. CA certificates and timezone data will be added explicitly
-# when the service makes its first outbound HTTPS calls.
+# no libc or shared-library dependencies. CA certificates and timezone data are
+# copied from the builder so outbound HTTPS and time.LoadLocation work correctly.
 FROM scratch
 ARG VERSION
 ENV VERSION=$VERSION
 
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /go/src/lucos_aithne/lucos_aithne /lucos_aithne
 
 HEALTHCHECK CMD ["/lucos_aithne", "--healthcheck"]
