@@ -73,13 +73,16 @@
       <a href="/admin/enrol">Generate invite</a>
     </nav>
 
-    {{/* Lookup form — plain GET, bookmarkable URL, no JS required */}}
-    <form class="search-form" method="get" action="/admin/grants">
+    {{/* Lookup form — plain GET, bookmarkable URL */}}
+    <form class="search-form" method="get" action="/admin/grants" id="lookupForm">
       <div>
-        <label for="contactId">Contact ID</label>
-        <input type="text" id="contactId" name="contact_id"
-               value="{{.ContactID}}" placeholder="e.g. 42"
-               autocomplete="off">
+        <label for="contactSearch">Contact</label>
+        <input type="text" id="contactSearch"
+               value="{{if .ContactDisplayName}}{{.ContactDisplayName}}{{else}}{{.ContactID}}{{end}}"
+               placeholder="Type a name…"
+               autocomplete="off" list="contactsList">
+        <input type="hidden" id="contactIdHidden" name="contact_id" value="{{.ContactID}}">
+        <datalist id="contactsList"></datalist>
       </div>
       <button type="submit">Look up</button>
     </form>
@@ -154,7 +157,10 @@
     const principalId  = {{.PrincipalID | js}};
     const contactId    = {{.ContactID | js}};
 
-    const errorBox = document.getElementById('errorBox');
+    const errorBox     = document.getElementById('errorBox');
+    const searchInput  = document.getElementById('contactSearch');
+    const hiddenInput  = document.getElementById('contactIdHidden');
+    const datalist     = document.getElementById('contactsList');
 
     function showError(msg) {
       errorBox.textContent = msg;
@@ -166,6 +172,49 @@
       errorBox.hidden = true;
       errorBox.textContent = '';
     }
+
+    // ── Contact name search ──────────────────────────────────────────────────
+    let contactsData = [];
+
+    // Fetch the contact list and populate the <datalist> for name-search.
+    (async function loadContacts() {
+      try {
+        const resp = await fetch('/admin/contacts', {
+          headers: { 'Authorization': 'Bearer ' + sessionToken },
+        });
+        if (!resp.ok) return;
+        contactsData = await resp.json();
+        contactsData.forEach(function(c) {
+          const opt = document.createElement('option');
+          opt.value = c.name;
+          datalist.appendChild(opt);
+        });
+      } catch (_) {
+        // Non-fatal — fall back to accepting a raw ID.
+      }
+    })();
+
+    // When the visible input changes (user typed or picked from list), resolve
+    // the matching contact ID and update the hidden field.
+    searchInput.addEventListener('change', function() {
+      const match = contactsData.find(function(c) { return c.name === searchInput.value; });
+      hiddenInput.value = match ? match.id : '';
+    });
+
+    // On submit: if no match was resolved, treat the typed value as a raw ID
+    // (graceful fallback when contacts are unavailable or admin typed an ID).
+    document.getElementById('lookupForm').addEventListener('submit', function(e) {
+      if (!hiddenInput.value) {
+        const txt = searchInput.value.trim();
+        if (txt) {
+          hiddenInput.value = txt;
+        } else {
+          e.preventDefault();
+          showError('Enter a contact name or ID to look up.');
+          searchInput.focus();
+        }
+      }
+    });
 
     // Reload preserving the current contact_id query param.
     function reloadPage() {

@@ -110,6 +110,74 @@ func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
 	return &contactInfo{DisplayName: name}, nil
 }
 
+// contactListItem is a single entry in the contact list returned by List.
+type contactListItem struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// List fetches all contacts from lucos_contacts as a flat [{id, name}] list.
+// Intended for the admin contact-search widget — the result is returned to the
+// admin browser via handleAdminContacts so the contacts API key stays server-side.
+// Returns an error if the service is unreachable or returns a non-200 status.
+func (c *contactsClient) List() ([]contactListItem, error) {
+	reqURL := fmt.Sprintf("%s/people/all", c.origin)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("contacts: build list request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.key)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("contacts: list request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("contacts: list: unexpected status %d", resp.StatusCode)
+	}
+
+	var raw []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("contacts: list: decode: %w", err)
+	}
+
+	items := make([]contactListItem, 0, len(raw))
+	for _, r := range raw {
+		items = append(items, contactListItem{ID: r.ID, Name: r.Name})
+	}
+	return items, nil
+}
+
+// handleAdminContacts proxies the full contact list from lucos_contacts to the
+// admin browser as JSON, so the name-search widget can populate a <datalist>.
+// Must be wrapped in requireAdminScope — the contacts service API key must not
+// be sent to the browser.
+func handleAdminContacts(contacts *contactsClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := contacts.List()
+		if err != nil {
+			log.Printf("handleAdminContacts: %v", err)
+			http.Error(w, "502 Bad Gateway — could not reach contacts service", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(items); err != nil {
+			log.Printf("handleAdminContacts: encode: %v", err)
+		}
+	}
+}
+
 // --- Go templates ---
 
 // enrolPageData is the data passed to templates/enrol.html.

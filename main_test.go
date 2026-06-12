@@ -136,6 +136,7 @@ func newAdminMux(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
+	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
 	mux.HandleFunc("/admin/invites/", requireAdminScope(s, testIssuer, handleAdminInviteByHash(s)))
 	return mux
@@ -3978,5 +3979,137 @@ func TestStore_RevokeInviteByHash_AlreadyUsed(t *testing.T) {
 	err = s.RevokeInviteByHash(hash)
 	if !errors.Is(err, store.ErrInviteUsed) {
 		t.Errorf("expected ErrInviteUsed on double-revoke, got %v", err)
+	}
+}
+
+// ── handleAdminContacts tests ────────────────────────────────────────────────
+
+// TestHandleAdminContacts_Success verifies that GET /admin/contacts proxies the
+// contact list from lucos_contacts and returns JSON with id and name fields.
+func TestHandleAdminContacts_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// Mock contacts server returning two contacts.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/people/all" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":"1","name":"Alice Example"},{"id":"2","name":"Bob Test"}]`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/contacts", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected application/json Content-Type, got %q", ct)
+	}
+	var items []contactListItem
+	if err := json.Unmarshal(rr.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 contacts, got %d", len(items))
+	}
+	if items[0].ID != "1" || items[0].Name != "Alice Example" {
+		t.Errorf("unexpected first contact: %+v", items[0])
+	}
+	if items[1].ID != "2" || items[1].Name != "Bob Test" {
+		t.Errorf("unexpected second contact: %+v", items[1])
+	}
+}
+
+// TestHandleAdminContacts_RequiresAdmin verifies that unauthenticated requests
+// to GET /admin/contacts are rejected with 401.
+func TestHandleAdminContacts_RequiresAdmin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/contacts", nil)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+// TestHandleAdminContacts_ContactsUnavailable verifies that if lucos_contacts is
+// unreachable the handler returns 502 rather than crashing.
+func TestHandleAdminContacts_ContactsUnavailable(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// Point at a non-existent server so the HTTP call fails.
+	contacts := newContactsClient("http://127.0.0.1:1", "test-key")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/contacts", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", rr.Code)
+	}
+}
+
+// TestHandleAdminContacts_MethodNotAllowed verifies that non-GET requests return 405.
+func TestHandleAdminContacts_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	contacts := newContactsClient("http://contacts.test", "test-key")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/contacts", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
 	}
 }
