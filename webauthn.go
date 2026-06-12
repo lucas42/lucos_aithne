@@ -451,7 +451,7 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		token.SetSessionCookie(w, tok)
+		token.SetSessionCookie(w, tok, environment)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})

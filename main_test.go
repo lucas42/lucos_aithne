@@ -3515,7 +3515,7 @@ func TestLogout_ClearsCookieAndRedirects(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Origin", testIssuer)
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer)(rr, req)
+	handleLogout(testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("expected HTTP 303, got %d", rr.Code)
@@ -3544,7 +3544,7 @@ func TestLogout_WrongOrigin_Forbidden(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Origin", "https://evil.example.com")
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer)(rr, req)
+	handleLogout(testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected HTTP 403, got %d", rr.Code)
@@ -3555,7 +3555,7 @@ func TestLogout_MissingOrigin_Forbidden(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	// No Origin header set.
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer)(rr, req)
+	handleLogout(testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected HTTP 403, got %d", rr.Code)
@@ -3565,7 +3565,7 @@ func TestLogout_MissingOrigin_Forbidden(t *testing.T) {
 func TestLogout_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer)(rr, req)
+	handleLogout(testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected HTTP 405, got %d", rr.Code)
