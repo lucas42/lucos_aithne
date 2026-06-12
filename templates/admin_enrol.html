@@ -53,18 +53,17 @@
   </style>
 </head>
 <body>
-  <lucos-navbar>lucOS Admin</lucos-navbar>
+  <lucos-navbar>Generate invite — lucOS</lucos-navbar>
   <div class="card">
     <nav class="admin-nav">
-      <a href="/admin/grants">Manage grants</a>
       <a href="/">← Home</a>
+      <a href="/admin/grants">Manage grants</a>
     </nav>
-    <p class="subtitle">Generate a passkey enrolment invite for a contact.</p>
 
     <form id="inviteForm" novalidate>
       <label for="contactId">Contact ID</label>
       <input type="text" id="contactId" name="contact_id"
-             placeholder="e.g. lucas" autocomplete="off" required>
+             placeholder="e.g. 42" autocomplete="off" required>
       <button type="submit" id="submitBtn">Generate invite link</button>
     </form>
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>

@@ -66,20 +66,19 @@
   </style>
 </head>
 <body>
-  <lucos-navbar>lucOS Admin</lucos-navbar>
+  <lucos-navbar>Manage grants — lucOS</lucos-navbar>
   <div class="card">
     <nav class="admin-nav">
-      <a href="/admin/enrol">Generate invite</a>
       <a href="/">← Home</a>
+      <a href="/admin/enrol">Generate invite</a>
     </nav>
-    <p class="subtitle">Manage scope grants for a contact.</p>
 
     {{/* Lookup form — plain GET, bookmarkable URL, no JS required */}}
     <form class="search-form" method="get" action="/admin/grants">
       <div>
         <label for="contactId">Contact ID</label>
         <input type="text" id="contactId" name="contact_id"
-               value="{{.ContactID}}" placeholder="e.g. lucas"
+               value="{{.ContactID}}" placeholder="e.g. 42"
                autocomplete="off">
       </div>
       <button type="submit">Look up</button>
