@@ -24,7 +24,6 @@
       width: 100%;
       max-width: 420px;
     }
-    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
     .subtitle { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
     label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .375rem; }
     input[type="text"] {
@@ -99,8 +98,8 @@
   </style>
 </head>
 <body>
+  <lucos-navbar>lucOS Admin</lucos-navbar>
   <div class="card">
-    <h1>lucOS Admin</h1>
     <p class="subtitle">Generate a passkey enrolment invite for a contact.</p>
 
     <form id="inviteForm" novalidate>
@@ -206,5 +205,6 @@
       }
     });
   </script>
+  <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
 </body>
 </html>

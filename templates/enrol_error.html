@@ -25,7 +25,6 @@
       max-width: 360px;
       text-align: center;
     }
-    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
     h2 { font-size: 1rem; margin-bottom: .625rem; color: #1a1a1a; }
     p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
     a {
@@ -37,8 +36,8 @@
   </style>
 </head>
 <body>
+  <lucos-navbar>lucOS</lucos-navbar>
   <div class="card">
-    <h1>lucOS</h1>
     {{if eq .Reason "not_found"}}
     <h2>Invite not valid</h2>
     <p>This invite link isn't valid. Contact lucas42 to get a new one.</p>
@@ -54,5 +53,6 @@
     {{end}}
     <a href="/auth/login">← Back to sign in</a>
   </div>
+  <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
 </body>
 </html>
