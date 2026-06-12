@@ -813,6 +813,9 @@ func main() {
 	mux.HandleFunc("/favicon.svg", serveStaticFile(staticFS, "static/favicon.svg"))
 	mux.HandleFunc("/favicon.ico", serveStaticFile(staticFS, "static/favicon.svg"))
 
+	// lucOS navbar web-component bundle (compiled JS, embedded at build time).
+	mux.HandleFunc("/lucos_navbar.js", serveStaticFile(staticFS, "static/lucos_navbar.js"))
+
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
 

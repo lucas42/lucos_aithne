@@ -24,7 +24,6 @@
       width: 100%;
       max-width: 360px;
     }
-    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
     .subtitle { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
     button {
       display: block;
@@ -54,8 +53,8 @@
   </style>
 </head>
 <body>
+  <lucos-navbar>lucOS</lucos-navbar>
   <div class="card">
-    <h1>lucOS</h1>
     <p class="subtitle">Sign in with your passkey</p>
     <form id="loginForm" novalidate>
       <button type="submit" id="submitBtn">Sign in with passkey</button>
@@ -276,5 +275,6 @@
 
     startConditional();
   </script>
+  <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
 </body>
 </html>
