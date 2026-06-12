@@ -472,14 +472,85 @@ func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
 	}
 }
 
-// handleGrants dispatches GET (list) and POST (create) for /admin/grants.
-func handleGrants(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
+// adminGrantsPage serves the browser-facing grants management UI (GET /admin/grants
+// without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
+// Contact ID lookup and grant listing are server-rendered; grant creation and revocation
+// are performed by the embedded JavaScript using the session token for AJAX auth.
+func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
+	scopes := vocab.All()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nonce, err := applyPageCSP(w)
+		if err != nil {
+			log.Printf("adminGrantsPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
+		data := adminGrantsPageData{
+			Nonce:              nonce,
+			SessionToken:       sessionToken,
+			Scopes:             scopes,
+			DefaultEnvironment: defaultEnv,
+		}
+		contactID := r.URL.Query().Get("contact_id")
+		if contactID != "" {
+			data.ContactID = contactID
+			envFilter := r.URL.Query().Get("environment")
+			p, perr := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
+			if errors.Is(perr, store.ErrNotFound) {
+				data.LookupError = "No principal found for contact ID “" + contactID + "”."
+			} else if perr != nil {
+				log.Printf("adminGrantsPage: lookup principal %q: %v", contactID, perr)
+				data.LookupError = "Could not look up principal. Try again."
+			} else {
+				data.PrincipalID = p.ID
+				grants, gerr := s.ListGrants(p.ID, envFilter, true)
+				if gerr != nil {
+					log.Printf("adminGrantsPage: list grants for principal %q: %v", p.ID, gerr)
+					data.LookupError = "Could not load grants. Try again."
+				} else {
+					data.Grants = make([]grantJSON, 0, len(grants))
+					for _, g := range grants {
+						data.Grants = append(data.Grants, grantToJSON(g))
+					}
+				}
+			}
+		}
+		if err := tmpl.Execute(w, data); err != nil {
+			log.Printf("adminGrantsPage: render: %v", err)
+		}
+	}
+}
+
+// handleGrants serves /admin/grants.
+//
+// GET without an Authorization: Bearer header → HTML management page (browser
+// session via requireAdminScopeFromCookie).
+// GET with Authorization: Bearer → JSON list of active grants (API).
+// POST with Authorization: Bearer → JSON grant creation (API).
+//
+// This content-negotiation approach keeps the grants UI at the natural URL
+// without adding a separate route, and is safe because browser-initiated GETs
+// never carry an Authorization header.
+func handleGrants(s *store.Store, vocab *store.Vocabulary, issuer, environment string) http.HandlerFunc {
+	htmlPage := requireAdminScopeFromCookie(s, issuer, adminGrantsPage(s, vocab, environment))
+	jsonList := requireAdminScope(s, issuer, listGrants(s))
+	jsonCreate := requireAdminScope(s, issuer, createGrant(s, vocab))
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			listGrants(s)(w, r)
+			if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+				jsonList(w, r)
+			} else {
+				htmlPage(w, r)
+			}
 		case http.MethodPost:
-			createGrant(s, vocab)(w, r)
+			jsonCreate(w, r)
 		default:
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 		}
@@ -647,8 +718,21 @@ type loginPageData struct {
 // homePageData holds the per-request data injected into templates/index.html.
 type homePageData struct {
 	LoggedIn    bool
+	IsAdmin     bool   // true when the session carries aithne:admin scope
 	DisplayName string
 	Nonce       string
+}
+
+// adminGrantsPageData holds the per-request data for templates/admin_grants.html.
+type adminGrantsPageData struct {
+	Nonce              string
+	SessionToken       string   // raw JWT — embedded for AJAX calls (HttpOnly cookie inaccessible to JS)
+	Scopes             []string // sorted vocabulary for the scope <select>
+	DefaultEnvironment string   // pre-fills the environment field
+	ContactID          string   // what the admin searched for
+	PrincipalID        string   // resolved UUID, empty when not yet looked up or not found
+	Grants             []grantJSON
+	LookupError        string // e.g. "contact not found"
 }
 
 // handleHomePage serves GET / — the homepage.
@@ -682,6 +766,12 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 					if perr == nil {
 						data.LoggedIn = true
 						contactID := claims.Subject
+						for _, sc := range claims.Scopes {
+							if sc == "aithne:admin" {
+								data.IsAdmin = true
+								break
+							}
+						}
 						// Resolve display name from lucos_contacts; fall back to contact ID.
 						if info, err := contacts.Get(contactID); err == nil {
 							data.DisplayName = info.DisplayName
@@ -927,7 +1017,7 @@ func main() {
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
 	// Admin enrolment surface (all gated on aithne:admin scope).
-	mux.HandleFunc("/admin/grants", requireAdminScope(s, issuer, handleGrants(s, vocab)))
+	mux.HandleFunc("/admin/grants", handleGrants(s, vocab, issuer, environment))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))

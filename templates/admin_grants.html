@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manage grants — lucOS Admin</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/aithne.css">
+  <style nonce="{{.Nonce}}">
+    .card { max-width: 640px; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+    }
+    .search-form { display: flex; gap: .5rem; align-items: flex-end; margin-bottom: 1.5rem; }
+    .search-form > div { flex: 1; }
+    .search-form input[type="text"] { margin-bottom: 0; }
+    .search-form button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
+    .principal-id {
+      font-size: .75rem; color: #888; margin-bottom: 1rem;
+    }
+    .principal-id code { font-family: monospace; word-break: break-all; }
+    h2 { font-size: 1rem; font-weight: 600; margin-bottom: .875rem; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: .875rem; margin-bottom: 1.5rem;
+    }
+    th {
+      text-align: left; padding: .5rem .625rem;
+      border-bottom: 2px solid #e0e0e0;
+      font-weight: 600; color: #555;
+    }
+    td { padding: .5rem .625rem; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+    td:last-child { width: 1%; white-space: nowrap; }
+    .revoke-btn {
+      display: inline-block; width: auto;
+      padding: .25rem .625rem; font-size: .8rem; font-weight: 500;
+      background: #fff0f0; border: 1px solid #f5c6cb; color: #c00;
+      border-radius: 4px; cursor: pointer; transition: background .15s;
+    }
+    .revoke-btn:hover { background: #fcc; }
+    .revoke-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
+    .empty { color: #888; font-size: .875rem; margin-bottom: 1.5rem; }
+    .section-sep {
+      border: none; border-top: 1px solid #e0e0e0;
+      margin: 0 0 1.25rem;
+    }
+    .grant-form-heading { font-size: .875rem; font-weight: 600; margin-bottom: .75rem; }
+    .field-group { margin-bottom: .875rem; }
+    .field-row { display: flex; gap: .5rem; align-items: flex-end; }
+    .field-row > div { flex: 1; }
+    .field-row input[type="text"] { margin-bottom: 0; }
+    .field-row button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
+    select {
+      display: block; width: 100%; padding: .5rem .75rem;
+      font-size: 1rem; border: 1px solid #ccc;
+      border-radius: 6px; outline: none;
+      transition: border-color .15s;
+    }
+    select:focus { border-color: #c49000; }
+  </style>
+</head>
+<body>
+  <lucos-navbar>lucOS Admin</lucos-navbar>
+  <div class="card">
+    <p class="subtitle">Manage scope grants for a principal.</p>
+
+    {{/* Lookup form — plain GET, bookmarkable URL, no JS required */}}
+    <form class="search-form" method="get" action="/admin/grants">
+      <div>
+        <label for="contactId">Contact ID</label>
+        <input type="text" id="contactId" name="contact_id"
+               value="{{.ContactID}}" placeholder="e.g. lucas"
+               autocomplete="off">
+      </div>
+      <button type="submit">Look up</button>
+    </form>
+
+    <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
+
+    {{if .ContactID}}
+      {{if .LookupError}}
+        <div class="error" role="alert">{{.LookupError}}</div>
+      {{else}}
+        <p class="principal-id">Principal: <code>{{.PrincipalID}}</code></p>
+
+        {{if .Grants}}
+        <h2 id="grantsHeading">Active grants for {{.ContactID}}</h2>
+        <table aria-labelledby="grantsHeading">
+          <thead>
+            <tr>
+              <th scope="col">Scope</th>
+              <th scope="col">Environment</th>
+              <th scope="col">Granted by</th>
+              <th scope="col">Granted at</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="grantsBody">
+            {{range .Grants}}
+            <tr id="grant-{{.ID}}">
+              <td>{{.Scope}}</td>
+              <td>{{.Environment}}</td>
+              <td>{{.GrantedBy}}</td>
+              <td>{{.GrantedAt}}</td>
+              <td>
+                <button class="revoke-btn"
+                        data-grant-id="{{.ID}}"
+                        aria-label="Revoke {{.Scope}} ({{.Environment}})">Revoke</button>
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <p class="empty" id="emptyMsg">No active grants.</p>
+        {{end}}
+
+        <hr class="section-sep">
+        <p class="grant-form-heading">Grant a scope</p>
+        <form id="grantForm" novalidate>
+          <div class="field-group">
+            <label for="scopeSelect">Scope</label>
+            <select id="scopeSelect" name="scope">
+              {{range .Scopes}}
+              <option value="{{.}}">{{.}}</option>
+              {{end}}
+            </select>
+          </div>
+          <div class="field-row">
+            <div>
+              <label for="envInput">Environment</label>
+              <input type="text" id="envInput" name="environment"
+                     value="{{.DefaultEnvironment}}"
+                     placeholder="e.g. production"
+                     autocomplete="off" required>
+            </div>
+            <button type="submit" id="grantBtn">Grant scope</button>
+          </div>
+        </form>
+      {{end}}
+    {{end}}
+  </div>
+
+  <script nonce="{{.Nonce}}">
+    // Session token injected by the server — HttpOnly cookie is not readable by JS.
+    const sessionToken = {{.SessionToken | js}};
+    const principalId  = {{.PrincipalID | js}};
+    const contactId    = {{.ContactID | js}};
+
+    const errorBox = document.getElementById('errorBox');
+
+    function showError(msg) {
+      errorBox.textContent = msg;
+      errorBox.hidden = false;
+      errorBox.focus();
+    }
+
+    function clearError() {
+      errorBox.hidden = true;
+      errorBox.textContent = '';
+    }
+
+    // Reload preserving the current contact_id query param.
+    function reloadPage() {
+      const u = new URL(window.location.href);
+      u.searchParams.set('contact_id', contactId);
+      window.location.href = u.toString();
+    }
+
+    // ── Revoke ─────────────────────────────────────────────────────────────────
+    document.querySelectorAll('.revoke-btn').forEach(function(btn) {
+      btn.addEventListener('click', async function() {
+        const grantId = this.dataset.grantId;
+        clearError();
+        this.setAttribute('aria-disabled', 'true');
+        const origLabel = this.textContent;
+        this.textContent = 'Revoking…';
+        try {
+          const resp = await fetch('/admin/grants/' + encodeURIComponent(grantId), {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + sessionToken },
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            if (resp.status === 401 || resp.status === 403) {
+              showError('Access denied. Your session may have expired — sign out and back in.');
+            } else if (resp.status === 409) {
+              showError('This grant has already been revoked.');
+            } else {
+              showError('Could not revoke: ' + text.trim());
+            }
+            this.removeAttribute('aria-disabled');
+            this.textContent = origLabel;
+            return;
+          }
+          // Remove the row; show empty state if none remain.
+          const row = document.getElementById('grant-' + grantId);
+          if (row) row.remove();
+          const body = document.getElementById('grantsBody');
+          if (body && body.rows.length === 0) {
+            const tbl = body.closest('table');
+            if (tbl) {
+              const empty = document.createElement('p');
+              empty.className = 'empty';
+              empty.textContent = 'No active grants.';
+              tbl.parentNode.insertBefore(empty, tbl);
+              tbl.remove();
+            }
+          }
+        } catch (_) {
+          showError('Something went wrong. Try again.');
+          this.removeAttribute('aria-disabled');
+          this.textContent = origLabel;
+        }
+      });
+    });
+
+    // ── Grant ──────────────────────────────────────────────────────────────────
+    const grantForm = document.getElementById('grantForm');
+    if (grantForm) {
+      const grantBtn = document.getElementById('grantBtn');
+      grantForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        if (!principalId) return;
+        clearError();
+
+        const scope = document.getElementById('scopeSelect').value;
+        const env   = document.getElementById('envInput').value.trim();
+        if (!env) { showError('Enter an environment.'); document.getElementById('envInput').focus(); return; }
+
+        grantBtn.setAttribute('aria-disabled', 'true');
+        grantBtn.textContent = 'Granting…';
+        try {
+          const resp = await fetch('/admin/grants', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ' + sessionToken,
+            },
+            body: JSON.stringify({ principal_id: principalId, scope: scope, environment: env }),
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            if (resp.status === 401 || resp.status === 403) {
+              showError('Access denied. Your session may have expired — sign out and back in.');
+            } else if (resp.status === 409) {
+              showError('‘' + scope + '’ is already active in ‘' + env + '’.');
+            } else if (resp.status === 404) {
+              showError('Principal not found. Try looking up a different contact.');
+            } else {
+              showError('Could not grant scope: ' + text.trim());
+            }
+            return;
+          }
+          // Reload to show the new grant in the table.
+          reloadPage();
+        } catch (_) {
+          showError('Something went wrong. Try again.');
+        } finally {
+          grantBtn.removeAttribute('aria-disabled');
+          grantBtn.textContent = 'Grant scope';
+        }
+      });
+    }
+  </script>
+  <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
+</body>
+</html>
