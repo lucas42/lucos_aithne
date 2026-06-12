@@ -328,6 +328,45 @@ func TestAdminGrantsPage_ContactLookup(t *testing.T) {
 	}
 }
 
+// TestAdminGrantsPage_ContactNotFound verifies that looking up a contact ID
+// that has no registered principal renders an error message rather than crashing.
+func TestAdminGrantsPage_ContactNotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	admin, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin-3")
+	if err != nil {
+		t.Fatalf("create admin principal: %v", err)
+	}
+	adminTok, err := token.MintSession(admin, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint admin token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants?contact_id=no-such-contact", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: adminTok})
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (error rendered in page), got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "no-such-contact") {
+		t.Errorf("expected the searched contact ID in the error message, body: %s", body)
+	}
+	// Should not expose internal error details or render a grants table.
+	if strings.Contains(body, "<table") {
+		t.Error("expected no grants table for unknown contact")
+	}
+}
+
 func TestAdminGrants_RejectsInvalidToken(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {

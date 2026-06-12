@@ -480,10 +480,8 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
 	scopes := vocab.All()
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
+		// handleGrants only routes GET (no-Bearer) requests here, so a non-GET
+		// cannot arrive in practice. The guard is removed to avoid dead code.
 		nonce, err := applyPageCSP(w)
 		if err != nil {
 			log.Printf("adminGrantsPage: generate nonce: %v", err)
