@@ -37,7 +37,7 @@
   </style>
 </head>
 <body>
-  <lucos-navbar>{{if .IsRecovery}}Create new passkey{{else}}Set up passkey{{end}} — lucOS</lucos-navbar>
+  <lucos-navbar>{{if .IsRecovery}}Create new passkey{{else}}Set up passkey{{end}}</lucos-navbar>
   <div class="card">
     {{if .IsRecovery}}
     <p class="setup-context">You're replacing access for <strong>{{.DisplayName}}</strong>. Your old passkey will still work until you sign in with the new one.</p>

@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <lucos-navbar>{{if eq .Reason "expired"}}Invite expired{{else if eq .Reason "used"}}Invite already used{{else}}Invite not valid{{end}} — lucOS</lucos-navbar>
+  <lucos-navbar>{{if eq .Reason "expired"}}Invite expired{{else if eq .Reason "used"}}Invite already used{{else}}Invite not valid{{end}}</lucos-navbar>
   <div class="card">
     {{if eq .Reason "not_found"}}
     <h2>Invite not valid</h2>
