@@ -12,14 +12,19 @@
       position: absolute; width: 1px; height: 1px;
       overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
     }
+    .admin-nav {
+      display: flex; gap: 1rem;
+      font-size: .8rem;
+      margin-bottom: 1.25rem;
+      padding-bottom: .875rem;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .admin-nav a { color: #555; text-decoration: none; }
+    .admin-nav a:hover { text-decoration: underline; }
     .search-form { display: flex; gap: .5rem; align-items: flex-end; margin-bottom: 1.5rem; }
     .search-form > div { flex: 1; }
     .search-form input[type="text"] { margin-bottom: 0; }
     .search-form button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
-    .principal-id {
-      font-size: .75rem; color: #888; margin-bottom: 1rem;
-    }
-    .principal-id code { font-family: monospace; word-break: break-all; }
     h2 { font-size: 1rem; font-weight: 600; margin-bottom: .875rem; }
     table {
       width: 100%; border-collapse: collapse;
@@ -63,7 +68,11 @@
 <body>
   <lucos-navbar>lucOS Admin</lucos-navbar>
   <div class="card">
-    <p class="subtitle">Manage scope grants for a principal.</p>
+    <nav class="admin-nav">
+      <a href="/admin/enrol">Generate invite</a>
+      <a href="/">← Home</a>
+    </nav>
+    <p class="subtitle">Manage scope grants for a contact.</p>
 
     {{/* Lookup form — plain GET, bookmarkable URL, no JS required */}}
     <form class="search-form" method="get" action="/admin/grants">
@@ -82,8 +91,6 @@
       {{if .LookupError}}
         <div class="error" role="alert">{{.LookupError}}</div>
       {{else}}
-        <p class="principal-id">Principal: <code>{{.PrincipalID}}</code></p>
-
         {{if .Grants}}
         <h2 id="grantsHeading">Active grants for {{.ContactID}}</h2>
         <table aria-labelledby="grantsHeading">
