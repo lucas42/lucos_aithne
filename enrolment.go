@@ -140,17 +140,9 @@ func (c *contactsClient) List() ([]contactListItem, error) {
 		return nil, fmt.Errorf("contacts: list: unexpected status %d", resp.StatusCode)
 	}
 
-	var raw []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	var items []contactListItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
 		return nil, fmt.Errorf("contacts: list: decode: %w", err)
-	}
-
-	items := make([]contactListItem, 0, len(raw))
-	for _, r := range raw {
-		items = append(items, contactListItem{ID: r.ID, Name: r.Name})
 	}
 	return items, nil
 }
