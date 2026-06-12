@@ -666,6 +666,84 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 	}
 }
 
+// homePageData holds the per-request data injected into templates/index.html.
+type homePageData struct {
+	LoggedIn    bool
+	DisplayName string
+	Nonce       string
+}
+
+// handleHomePage serves the root path (/{$}) as a Go template, showing different
+// content depending on whether the user has a valid session cookie.
+// Unlike requireAdminScopeFromCookie it never redirects — an absent or invalid
+// cookie simply results in the logged-out view.
+func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmplFS fs.FS) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(tmplFS, "templates/index.html"))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nonce, err := applyPageCSP(w)
+		if err != nil {
+			log.Printf("handleHomePage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		data := homePageData{Nonce: nonce}
+		// Soft session check — no redirect on failure.
+		if cookie, err := r.Cookie("aithne_session"); err == nil {
+			keys, kerr := s.ListVerificationKeys(token.VerificationWindow)
+			if kerr == nil {
+				keySet, kserr := token.BuildVerificationKeySet(keys)
+				if kserr == nil {
+					claims, perr := token.ParseSession(cookie.Value, keySet, issuer, "l42.eu")
+					if perr == nil {
+						data.LoggedIn = true
+						contactID := claims.Subject
+						if info, err := contacts.Get(contactID); err == nil {
+							data.DisplayName = info.DisplayName
+						} else {
+							log.Printf("handleHomePage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, err)
+							data.DisplayName = contactID
+						}
+					}
+				}
+			}
+		}
+		if err := tmpl.Execute(w, data); err != nil {
+			log.Printf("handleHomePage: render: %v", err)
+		}
+	}
+}
+
+// handleLogout serves POST /auth/logout.
+// It performs an Origin-header CSRF check (required because the session cookie is
+// SameSite=None), clears the session cookie, and redirects to /.
+func handleLogout(appOrigin string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("Origin") != appOrigin {
+			http.Error(w, "403 Forbidden — invalid origin", http.StatusForbidden)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "aithne_session",
+			Value:    "",
+			Domain:   "l42.eu",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
+			MaxAge:   -1,
+		})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
 // deriveRPID determines the WebAuthn RP ID from the APP_ORIGIN URL.
 //
 // In production (APP_ORIGIN = "https://aithne.l42.eu") the RP ID is set to
@@ -807,7 +885,9 @@ func main() {
 	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(issuer))
 
 	// Index page — serves the root path only (/{$} prevents catch-all matching).
-	mux.HandleFunc("/{$}", serveStaticFile(staticFS, "static/index.html"))
+	// Dynamic template: shows sign-in prompt when logged out, or name + sign-out
+	// button when a valid session cookie is present.
+	mux.HandleFunc("/{$}", handleHomePage(s, issuer, contacts, templateFS))
 
 	// Favicon — served from both paths; /favicon.ico handles the legacy automatic browser request.
 	mux.HandleFunc("/favicon.svg", serveStaticFile(staticFS, "static/favicon.svg"))
@@ -818,6 +898,9 @@ func main() {
 
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
+
+	// Logout endpoint — clears the session cookie and redirects to /.
+	mux.HandleFunc("/auth/logout", handleLogout(issuer))
 
 	// WebAuthn login ceremony endpoints.
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))

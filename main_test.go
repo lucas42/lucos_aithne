@@ -3135,6 +3135,236 @@ func TestBootstrapAdmin_IdempotentWhenNoCredential(t *testing.T) {
 	}
 }
 
+// --- Homepage handler tests ---
+
+// newHomePageMux builds a minimal test ServeMux with handleHomePage wired at /{$}.
+func newHomePageMux(t *testing.T, s *store.Store, contactsSrv *httptest.Server) *http.ServeMux {
+	t.Helper()
+	contactsURL := "http://127.0.0.1:1" // unreachable by default
+	if contactsSrv != nil {
+		contactsURL = contactsSrv.URL
+	}
+	contacts := newContactsClient(contactsURL, "test-key")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/{$}", handleHomePage(s, testIssuer, contacts, templateFS))
+	return mux
+}
+
+func TestHomePage_LoggedOut_ShowsSignInButton(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Sign in with passkey") {
+		t.Error("logged-out homepage should show 'Sign in with passkey'")
+	}
+	if strings.Contains(body, "Sign out") {
+		t.Error("logged-out homepage should not show 'Sign out'")
+	}
+}
+
+func TestHomePage_LoggedIn_ShowsNameAndLogout(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Alice Example"}`)
+	}))
+	defer contactsSrv.Close()
+
+	cookie := mintSessionCookie(t, s, "alice-contact-id")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, contactsSrv).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Alice Example") {
+		t.Errorf("logged-in homepage should show display name 'Alice Example'; body: %s", body)
+	}
+	if !strings.Contains(body, "Sign out") {
+		t.Error("logged-in homepage should show 'Sign out' button")
+	}
+	if strings.Contains(body, "Sign in with passkey") {
+		t.Error("logged-in homepage should not show 'Sign in with passkey'")
+	}
+}
+
+func TestHomePage_InvalidCookie_ShowsSignInButton(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: "not.a.valid.jwt"})
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (not redirect) for invalid cookie, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Sign in with passkey") {
+		t.Error("invalid-cookie homepage should fall back to logged-out view")
+	}
+}
+
+func TestHomePage_LoggedIn_FallsBackToContactIDWhenContactsUnavailable(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// Contacts unreachable — nil causes newHomePageMux to use 127.0.0.1:1.
+	contactID := "contact-99"
+	cookie := mintSessionCookie(t, s, contactID)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when contacts unavailable, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	// Display name should fall back to the contact ID when contacts is down.
+	if !strings.Contains(body, contactID) {
+		t.Errorf("should display contact ID as fallback name; body: %s", body)
+	}
+	if !strings.Contains(body, "Sign out") {
+		t.Error("should still show logged-in view even when contacts unavailable")
+	}
+}
+
+func TestHomePage_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /, got %d", rr.Code)
+	}
+}
+
+func TestHomePage_SetsCSP(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	newHomePageMux(t, s, nil).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	checkCSPNonce(t, rr)
+}
+
+// --- Logout handler tests ---
+
+func TestLogout_ClearsCookieAndRedirects(t *testing.T) {
+	const origin = "https://aithne.test"
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Origin", origin)
+	rr := httptest.NewRecorder()
+	handleLogout(origin)(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/" {
+		t.Errorf("expected redirect to /, got %q", loc)
+	}
+	// Verify the Set-Cookie header clears the session cookie.
+	cookieHeader := rr.Header().Get("Set-Cookie")
+	if !strings.Contains(cookieHeader, "aithne_session=") {
+		t.Errorf("Set-Cookie should clear aithne_session; got: %q", cookieHeader)
+	}
+	if !strings.Contains(cookieHeader, "Max-Age=0") {
+		t.Errorf("Set-Cookie should set Max-Age=0 to expire the cookie; got: %q", cookieHeader)
+	}
+}
+
+func TestLogout_WrongOrigin_Forbidden(t *testing.T) {
+	const appOrigin = "https://aithne.test"
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handleLogout(appOrigin)(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for wrong origin, got %d", rr.Code)
+	}
+}
+
+func TestLogout_MissingOrigin_Forbidden(t *testing.T) {
+	const appOrigin = "https://aithne.test"
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	// No Origin header set.
+	rr := httptest.NewRecorder()
+	handleLogout(appOrigin)(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 when Origin header missing, got %d", rr.Code)
+	}
+}
+
+func TestLogout_MethodNotAllowed(t *testing.T) {
+	const appOrigin = "https://aithne.test"
+	req := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
+	req.Header.Set("Origin", appOrigin)
+	rr := httptest.NewRecorder()
+	handleLogout(appOrigin)(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for GET /auth/logout, got %d", rr.Code)
+	}
+}
+
 // --- store.OIDCClient tests ---
 
 func TestOIDCClientHasRedirectURI(t *testing.T) {
