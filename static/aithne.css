@@ -58,6 +58,14 @@ button[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events
 }
 .error[hidden] { display: none; }
 
+/* Shown when a contacts service lookup fails and the raw ID is used as fallback. */
+.name-unavailable {
+  font-size: .8em;
+  font-weight: normal;
+  font-style: italic;
+  color: #888;
+}
+
 label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .375rem; }
 input[type="text"] {
   display: block;

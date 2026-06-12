@@ -114,11 +114,12 @@ func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
 
 // enrolPageData is the data passed to templates/enrol.html.
 type enrolPageData struct {
-	Token       string // raw invite token (for JS to read)
-	ContactID   string
-	DisplayName string
-	IsRecovery  bool // true if the principal already has at least one passkey
-	Nonce       string
+	Token                string // raw invite token (for JS to read)
+	ContactID            string
+	DisplayName          string
+	DisplayNameAvailable bool   // false when the contacts lookup failed and DisplayName is the raw contact ID
+	IsRecovery           bool   // true if the principal already has at least one passkey
+	Nonce                string
 }
 
 // enrolErrorPageData is the data passed to templates/enrol_error.html.
@@ -337,10 +338,12 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 
 		// Fetch display name from lucos_contacts.
 		info, err := contacts.Get(inv.ContactID)
+		displayNameAvailable := true
 		if err != nil {
 			log.Printf("enrol: contacts lookup %q: %v", inv.ContactID, err)
 			// Non-fatal: render with contact ID as fallback name.
 			info = &contactInfo{DisplayName: inv.ContactID}
+			displayNameAvailable = false
 		}
 
 		// Check whether this is a re-enrolment (principal already has passkeys).
@@ -359,11 +362,12 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 		}
 
 		if err := enrolTmpl.Execute(w, enrolPageData{
-			Token:       rawToken,
-			ContactID:   inv.ContactID,
-			DisplayName: info.DisplayName,
-			IsRecovery:  isRecovery,
-			Nonce:       nonce,
+			Token:                rawToken,
+			ContactID:            inv.ContactID,
+			DisplayName:          info.DisplayName,
+			DisplayNameAvailable: displayNameAvailable,
+			IsRecovery:           isRecovery,
+			Nonce:                nonce,
 		}); err != nil {
 			log.Printf("handleEnrolPage: render: %v", err)
 		}

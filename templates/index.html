@@ -27,7 +27,7 @@
   <lucos-navbar>Aithne</lucos-navbar>
   <div class="card">
     {{if .LoggedIn}}
-    <p>You are signed in as <strong>{{.DisplayName}}</strong>.</p>
+    <p>You are signed in as <strong>{{.DisplayName}}</strong>{{if not .DisplayNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}.</p>
     {{if .IsAdmin}}
     <p><a href="/admin/grants" class="action">Manage grants →</a></p>
     {{end}}
