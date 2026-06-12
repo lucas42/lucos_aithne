@@ -209,6 +209,7 @@ type createInviteResponse struct {
 	InviteURL   string `json:"invite_url"`
 	ExpiresAt   string `json:"expires_at"`
 	DisplayName string `json:"display_name"` // from lucos_contacts; used by the admin UI to confirm the right person
+	TokenHash   string `json:"token_hash"`   // SHA-256(rawToken) hex — stored by the admin UI to offer revocation
 }
 
 // handleAdminInvites handles POST /admin/invites.
@@ -279,7 +280,54 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 			InviteURL:   inviteURL,
 			ExpiresAt:   inv.ExpiresAt.Format(time.RFC3339),
 			DisplayName: contactInfo.DisplayName,
+			TokenHash:   inv.TokenHash,
 		})
+	}
+}
+
+// --- DELETE /admin/invites/{token_hash} ---
+
+// handleAdminInviteByHash handles DELETE /admin/invites/{token_hash}.
+// It revokes a pending invite by marking its used_at field, preventing the
+// invitee from using it to enrol a passkey.
+// The token_hash (not the raw token) is the right identifier for this endpoint:
+// the raw token is never stored and only returned once at creation, but the hash
+// is stable and safe to reference in URLs and admin tooling.
+// Requires aithne:admin scope (enforced by requireAdminScope wrapper).
+func handleAdminInviteByHash(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Extract the token hash from the path: /admin/invites/{token_hash}
+		tokenHash := strings.TrimPrefix(r.URL.Path, "/admin/invites/")
+		if tokenHash == "" {
+			http.Error(w, "400 Bad Request — token hash required", http.StatusBadRequest)
+			return
+		}
+
+		// Attribution from verified JWT claims (injected by requireAdminScope).
+		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+
+		err := s.RevokeInviteByHash(tokenHash)
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, store.ErrInviteUsed) {
+			http.Error(w, "409 Conflict — invite has already been used or revoked", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			log.Printf("revokeInvite: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("Invite revoked — hash: %s, revoked_by: %s", tokenHash, claims.Subject)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
