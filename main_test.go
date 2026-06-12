@@ -3774,7 +3774,7 @@ func TestAdminInviteByHash_Revoke_NotFound(t *testing.T) {
 	}
 	tok := mintBearerToken(t, s, []string{"aithne:admin"})
 
-	req := httptest.NewRequest(http.MethodDelete, "/admin/invites/deadbeef0000000000000000000000000000000000000000000000000000000", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/admin/invites/deadbeef00000000000000000000000000000000000000000000000000000000", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	newAdminMux(s).ServeHTTP(rr, req)
