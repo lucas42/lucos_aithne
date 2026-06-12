@@ -6,9 +6,9 @@
   <title>Aithne — lucOS</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/aithne.css">
-  <style>
+  <style nonce="{{.Nonce}}">
     p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
-    a.action {
+    a.action, button.action {
       display: inline-block;
       padding: .625rem 1.25rem;
       background: #f5c300;
@@ -17,17 +17,26 @@
       text-decoration: none;
       font-weight: 600;
       font-size: .9rem;
+      border: none;
+      cursor: pointer;
     }
-    a.action:hover { background: #d4a500; }
+    a.action:hover, button.action:hover { background: #d4a500; }
   </style>
 </head>
 <body>
   <lucos-navbar>lucOS</lucos-navbar>
   <div class="card">
     <p class="subtitle">Aithne — authentication service</p>
+    {{if .LoggedIn}}
+    <p>You are signed in as <strong>{{.DisplayName}}</strong>.</p>
+    <form method="post" action="/auth/logout">
+      <button type="submit" class="action">Sign out</button>
+    </form>
+    {{else}}
     <p>Aithne issues passkey-based access tokens to lucOS services. If you have a passkey registered, you can sign in.</p>
     <a href="/auth/login" class="action">Sign in with passkey →</a>
+    {{end}}
   </div>
-  <script src="/lucos_navbar.js"></script>
+  <script src="/lucos_navbar.js" nonce="{{.Nonce}}"></script>
 </body>
 </html>
