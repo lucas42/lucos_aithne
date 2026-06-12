@@ -342,9 +342,9 @@ func TestJWKSHandler_CacheControlHeader(t *testing.T) {
 
 // --- SetSessionCookie ---
 
-func TestSetSessionCookie(t *testing.T) {
+func TestSetSessionCookie_Production(t *testing.T) {
 	rr := httptest.NewRecorder()
-	token.SetSessionCookie(rr, "test-token-value")
+	token.SetSessionCookie(rr, "test-token-value", "production")
 
 	cookies := rr.Result().Cookies()
 	if len(cookies) == 0 {
@@ -369,6 +369,39 @@ func TestSetSessionCookie(t *testing.T) {
 		t.Error("cookie should be HttpOnly")
 	}
 	if !sessionCookie.Secure {
-		t.Error("cookie should be Secure")
+		t.Error("production cookie should be Secure")
+	}
+}
+
+func TestSetSessionCookie_Development(t *testing.T) {
+	rr := httptest.NewRecorder()
+	token.SetSessionCookie(rr, "test-token-value", "development")
+
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected at least one cookie")
+	}
+	var sessionCookie *http.Cookie
+	for i := range cookies {
+		if cookies[i].Name == "aithne_session" {
+			sessionCookie = cookies[i]
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("aithne_session cookie not set")
+	}
+	if sessionCookie.Value != "test-token-value" {
+		t.Errorf("cookie value: got %q, want %q", sessionCookie.Value, "test-token-value")
+	}
+	// Development: no Domain attribute so the browser scopes to current host (localhost).
+	if sessionCookie.Domain != "" {
+		t.Errorf("development cookie domain: got %q, want empty (host-scoped)", sessionCookie.Domain)
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("cookie should be HttpOnly")
+	}
+	// Development: no Secure flag — plain-HTTP localhost sessions must work.
+	if sessionCookie.Secure {
+		t.Error("development cookie should not be Secure (plain-HTTP localhost)")
 	}
 }

@@ -789,11 +789,12 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 }
 
 // handleLogout serves POST /auth/logout.
-// It validates the Origin header as a CSRF guard (the session cookie is
-// SameSite=None, so standard SameSite CSRF protection does not apply), clears
-// the aithne_session cookie, and redirects to /.
+// It validates the Origin header as a CSRF guard, clears the aithne_session
+// cookie, and redirects to /.
 // See lucos-security analysis on lucos_aithne#87 for the threat-model rationale.
-func handleLogout(appOrigin string) http.HandlerFunc {
+// The Origin check is always required regardless of SameSite mode, since in
+// development SameSite=Lax applies and in production SameSite=None applies.
+func handleLogout(appOrigin, environment string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -807,18 +808,9 @@ func handleLogout(appOrigin string) http.HandlerFunc {
 			http.Error(w, "403 Forbidden — invalid origin", http.StatusForbidden)
 			return
 		}
-		// Clear the session cookie. MaxAge: -1 sends Max-Age=0 in the header,
-		// which instructs the browser to delete the cookie immediately.
-		http.SetCookie(w, &http.Cookie{
-			Name:     "aithne_session",
-			Value:    "",
-			Domain:   "l42.eu",
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   true,
-			SameSite: http.SameSiteNoneMode,
-			MaxAge:   -1,
-		})
+		// Clear the session cookie. Attributes must match those used in
+		// SetSessionCookie so the browser treats it as the same cookie.
+		token.ClearSessionCookie(w, environment)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
@@ -1007,7 +999,7 @@ func main() {
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
 
 	// Logout endpoint — clears the session cookie and redirects to /.
-	mux.HandleFunc("/auth/logout", handleLogout(issuer))
+	mux.HandleFunc("/auth/logout", handleLogout(issuer, environment))
 
 	// OAuth2/OIDC endpoints (ADR §1, §5).
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))

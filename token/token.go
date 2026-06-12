@@ -302,23 +302,66 @@ func MintIDToken(
 	return string(signed), nil
 }
 
+// cookieDomain returns the Domain attribute for the session cookie.
+// In development the domain is left empty so the browser scopes the cookie to
+// the current host (e.g. localhost) rather than rejecting it as a mismatch
+// against "l42.eu". In production it is set to "l42.eu" for estate-wide SSO.
+func cookieDomain(environment string) string {
+	if environment == "development" {
+		return ""
+	}
+	return "l42.eu"
+}
+
+// cookieSameSite returns the SameSite attribute for the session cookie.
+// Production uses SameSite=None (requires Secure) to allow cross-origin
+// sub-frame access within *.l42.eu. Development uses SameSite=Lax, which
+// is compatible with plain-HTTP localhost origins and is the safe browser default.
+func cookieSameSite(environment string) http.SameSite {
+	if environment == "development" {
+		return http.SameSiteLaxMode
+	}
+	return http.SameSiteNoneMode
+}
+
 // SetSessionCookie sets a session cookie containing tokenStr on the response.
-// The cookie is scoped to l42.eu (without the leading dot — RFC 6265 makes the
-// leading dot optional and Go's http.Cookie drops it on serialisation) so it is
-// sent to all *.l42.eu subdomains, enabling estate-wide SSO.
-// SameSite=None allows the cookie to be sent in cross-origin iframes
-// (e.g. a lucos service embedded on another l42.eu subdomain). SameSite=None
-// requires Secure; this function always sets Secure.
-func SetSessionCookie(w http.ResponseWriter, tokenStr string) {
+// Cookie attributes are environment-aware:
+//   - production: Domain="l42.eu" (estate-wide SSO across *.l42.eu), Secure,
+//     SameSite=None (permits cross-origin sub-frame cookie sending).
+//   - development: no Domain (browser scopes to current host, e.g. localhost),
+//     no Secure (plain-HTTP dev server), SameSite=Lax.
+//
+// The dev relaxation is intentional and necessary: Domain="l42.eu" + Secure=true
+// both cause browsers to silently discard the cookie on plain-HTTP localhost,
+// making the logged-in flow impossible to test locally.
+func SetSessionCookie(w http.ResponseWriter, tokenStr, environment string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "aithne_session",
 		Value:    tokenStr,
-		Domain:   "l42.eu", // covers all *.l42.eu subdomains per RFC 6265
+		Domain:   cookieDomain(environment),
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteNoneMode,
+		Secure:   environment != "development",
+		SameSite: cookieSameSite(environment),
 		// MaxAge matches the JWT TTL so the cookie and token expire together.
 		MaxAge: int(DefaultSessionTTL.Seconds()),
+	})
+}
+
+// ClearSessionCookie removes the aithne_session cookie from the client.
+// Domain, Secure, and SameSite must match the attributes used in SetSessionCookie;
+// a mismatch would cause the browser to treat the clear as targeting a different
+// cookie, leaving the original session cookie intact.
+func ClearSessionCookie(w http.ResponseWriter, environment string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "aithne_session",
+		Value:    "",
+		Domain:   cookieDomain(environment),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   environment != "development",
+		SameSite: cookieSameSite(environment),
+		// MaxAge: -1 sends Max-Age=0, instructing the browser to delete the cookie.
+		MaxAge: -1,
 	})
 }
