@@ -511,9 +511,11 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 				// Non-fatal: fall back to the contact ID if the lookup fails.
 				if info, cerr := contacts.Get(contactID); cerr == nil {
 					data.ContactDisplayName = info.DisplayName
+					data.ContactNameAvailable = true
 				} else {
 					log.Printf("adminGrantsPage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, cerr)
 					data.ContactDisplayName = contactID
+					// ContactNameAvailable stays false — template shows degradation hint
 				}
 				grants, gerr := s.ListGrants(p.ID, envFilter, true)
 				if gerr != nil {
@@ -723,23 +725,25 @@ type loginPageData struct {
 
 // homePageData holds the per-request data injected into templates/index.html.
 type homePageData struct {
-	LoggedIn    bool
-	IsAdmin     bool   // true when the session carries aithne:admin scope
-	DisplayName string
-	Nonce       string
+	LoggedIn             bool
+	IsAdmin              bool   // true when the session carries aithne:admin scope
+	DisplayName          string
+	DisplayNameAvailable bool   // false when contacts lookup failed and DisplayName is the raw contact ID
+	Nonce                string
 }
 
 // adminGrantsPageData holds the per-request data for templates/admin_grants.html.
 type adminGrantsPageData struct {
-	Nonce              string
-	SessionToken       string   // raw JWT — embedded for AJAX calls (HttpOnly cookie inaccessible to JS)
-	Scopes             []string // sorted vocabulary for the scope <select>
-	DefaultEnvironment string   // pre-fills the environment field
-	ContactID          string   // what the admin searched for
-	ContactDisplayName string   // display name from lucos_contacts; falls back to ContactID on error
-	PrincipalID        string   // resolved UUID, empty when not yet looked up or not found
-	Grants             []grantJSON
-	LookupError        string // e.g. "contact not found"
+	Nonce                string
+	SessionToken         string     // raw JWT — embedded for AJAX calls (HttpOnly cookie inaccessible to JS)
+	Scopes               []string   // sorted vocabulary for the scope <select>
+	DefaultEnvironment   string     // pre-fills the environment field
+	ContactID            string     // what the admin searched for
+	ContactDisplayName   string     // display name from lucos_contacts; falls back to ContactID on error
+	ContactNameAvailable bool       // false when contacts lookup failed and ContactDisplayName is the raw contact ID
+	PrincipalID          string     // resolved UUID, empty when not yet looked up or not found
+	Grants               []grantJSON
+	LookupError          string     // e.g. "contact not found"
 }
 
 // handleHomePage serves GET / — the homepage.
@@ -782,9 +786,11 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 						// Resolve display name from lucos_contacts; fall back to contact ID.
 						if info, err := contacts.Get(contactID); err == nil {
 							data.DisplayName = info.DisplayName
+							data.DisplayNameAvailable = true
 						} else {
 							log.Printf("handleHomePage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, err)
 							data.DisplayName = contactID
+							// DisplayNameAvailable stays false — template shows degradation hint
 						}
 					}
 				}

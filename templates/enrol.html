@@ -40,9 +40,9 @@
   <lucos-navbar>{{if .IsRecovery}}Create new passkey{{else}}Set up passkey{{end}}</lucos-navbar>
   <div class="card">
     {{if .IsRecovery}}
-    <p class="setup-context">You're replacing access for <strong>{{.DisplayName}}</strong>. Your old passkey will still work until you sign in with the new one.</p>
+    <p class="setup-context">You're replacing access for <strong>{{.DisplayName}}</strong>{{if not .DisplayNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}. Your old passkey will still work until you sign in with the new one.</p>
     {{else}}
-    <p class="setup-context">You're setting up access for <strong>{{.DisplayName}}</strong>.</p>
+    <p class="setup-context">You're setting up access for <strong>{{.DisplayName}}</strong>{{if not .DisplayNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}.</p>
     {{end}}
 
     <form id="enrolForm" novalidate>
