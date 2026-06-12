@@ -476,7 +476,7 @@ func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
 // without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
 // Contact ID lookup and grant listing are server-rendered; grant creation and revocation
 // are performed by the embedded JavaScript using the session token for AJAX auth.
-func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string) http.HandlerFunc {
+func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string, contacts *contactsClient) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
 	scopes := vocab.All()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -501,12 +501,20 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 			envFilter := r.URL.Query().Get("environment")
 			p, perr := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
 			if errors.Is(perr, store.ErrNotFound) {
-				data.LookupError = "No principal found for contact ID “" + contactID + "”."
+				data.LookupError = fmt.Sprintf("No principal found for contact ID %q.", contactID)
 			} else if perr != nil {
 				log.Printf("adminGrantsPage: lookup principal %q: %v", contactID, perr)
 				data.LookupError = "Could not look up principal. Try again."
 			} else {
 				data.PrincipalID = p.ID
+				// Fetch display name from lucos_contacts so the admin sees who they've looked up.
+				// Non-fatal: fall back to the contact ID if the lookup fails.
+				if info, cerr := contacts.Get(contactID); cerr == nil {
+					data.ContactDisplayName = info.DisplayName
+				} else {
+					log.Printf("adminGrantsPage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, cerr)
+					data.ContactDisplayName = contactID
+				}
 				grants, gerr := s.ListGrants(p.ID, envFilter, true)
 				if gerr != nil {
 					log.Printf("adminGrantsPage: list grants for principal %q: %v", p.ID, gerr)
@@ -535,8 +543,8 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 // This content-negotiation approach keeps the grants UI at the natural URL
 // without adding a separate route, and is safe because browser-initiated GETs
 // never carry an Authorization header.
-func handleGrants(s *store.Store, vocab *store.Vocabulary, issuer, environment string) http.HandlerFunc {
-	htmlPage := requireAdminScopeFromCookie(s, issuer, adminGrantsPage(s, vocab, environment))
+func handleGrants(s *store.Store, vocab *store.Vocabulary, issuer, environment string, contacts *contactsClient) http.HandlerFunc {
+	htmlPage := requireAdminScopeFromCookie(s, issuer, adminGrantsPage(s, vocab, environment, contacts))
 	jsonList := requireAdminScope(s, issuer, listGrants(s))
 	jsonCreate := requireAdminScope(s, issuer, createGrant(s, vocab))
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -728,6 +736,7 @@ type adminGrantsPageData struct {
 	Scopes             []string // sorted vocabulary for the scope <select>
 	DefaultEnvironment string   // pre-fills the environment field
 	ContactID          string   // what the admin searched for
+	ContactDisplayName string   // display name from lucos_contacts; falls back to ContactID on error
 	PrincipalID        string   // resolved UUID, empty when not yet looked up or not found
 	Grants             []grantJSON
 	LookupError        string // e.g. "contact not found"
@@ -1007,7 +1016,7 @@ func main() {
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
 	// Admin enrolment surface (all gated on aithne:admin scope).
-	mux.HandleFunc("/admin/grants", handleGrants(s, vocab, issuer, environment))
+	mux.HandleFunc("/admin/grants", handleGrants(s, vocab, issuer, environment, contacts))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))

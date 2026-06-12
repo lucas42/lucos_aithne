@@ -70,6 +70,7 @@
     <div class="error" id="errorBox" role="alert" tabindex="-1" hidden></div>
 
     <div class="result" id="resultBox" hidden>
+      <p id="recipientName" aria-live="polite"></p>
       <p>Send this link to the contact. It expires in 24 hours and can only be used once.</p>
       <output class="result-url" id="inviteUrl" aria-label="Invite URL" aria-live="polite"></output>
       <button class="copy-btn" id="copyBtn" type="button">Copy link</button>
@@ -139,6 +140,10 @@
         }
 
         const data = await resp.json();
+        const nameEl = document.getElementById('recipientName');
+        if (data.display_name) {
+          nameEl.textContent = 'Invite generated for ' + data.display_name + ' (' + contactId + ').';
+        }
         urlEl.textContent = data.invite_url;
         expiresEl.textContent = 'Expires: ' + new Date(data.expires_at).toLocaleString();
         resultBox.hidden = false;

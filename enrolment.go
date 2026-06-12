@@ -206,8 +206,9 @@ type createInviteRequest struct {
 
 // createInviteResponse is returned on success.
 type createInviteResponse struct {
-	InviteURL string `json:"invite_url"`
-	ExpiresAt string `json:"expires_at"`
+	InviteURL   string `json:"invite_url"`
+	ExpiresAt   string `json:"expires_at"`
+	DisplayName string `json:"display_name"` // from lucos_contacts; used by the admin UI to confirm the right person
 }
 
 // handleAdminInvites handles POST /admin/invites.
@@ -230,8 +231,10 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 			return
 		}
 
-		// Verify the contact exists in lucos_contacts.
-		if _, err := contacts.Get(req.ContactID); errors.Is(err, store.ErrNotFound) {
+		// Verify the contact exists in lucos_contacts and fetch their display name
+		// so the admin UI can confirm the right person was targeted.
+		contactInfo, err := contacts.Get(req.ContactID)
+		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, "422 Unprocessable Entity — contact_id not found in lucos_contacts", http.StatusUnprocessableEntity)
 			return
 		} else if err != nil {
@@ -242,7 +245,7 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 
 		// Get or create the human principal for this contact. This is safe to do
 		// here so the principal exists when begin is called later.
-		_, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, req.ContactID)
+		_, err = s.GetPrincipalByExternalID(store.PrincipalClassHuman, req.ContactID)
 		if errors.Is(err, store.ErrNotFound) {
 			if _, err = s.CreatePrincipal(store.PrincipalClassHuman, req.ContactID); err != nil {
 				log.Printf("admin/invites: create principal %q: %v", req.ContactID, err)
@@ -273,8 +276,9 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(createInviteResponse{
-			InviteURL: inviteURL,
-			ExpiresAt: inv.ExpiresAt.Format(time.RFC3339),
+			InviteURL:   inviteURL,
+			ExpiresAt:   inv.ExpiresAt.Format(time.RFC3339),
+			DisplayName: contactInfo.DisplayName,
 		})
 	}
 }
