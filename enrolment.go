@@ -141,9 +141,16 @@ type adminEnrolPageData struct {
 // Returns ("", error) on failure; the caller must write a 500 and return.
 // Used by every server-rendered HTML page: login, enrolment, and admin pages
 // all share this single CSP policy so a future directive change is a one-place edit.
-// Policy: default-src 'none', nonce-gated scripts and styles, img-src 'self' data:
-// ('self' for the favicon, data: for SVG data URIs in CSS background-image),
-// connect-src and form-action 'self', base-uri / frame-ancestors 'none'.
+// Policy: default-src 'none', nonce-gated scripts, style-src 'unsafe-inline',
+// img-src 'self' data: (favicon + SVG data URIs in CSS background-image),
+// connect-src 'self' https://am.l42.eu (lucos_navbar time-sync XHR),
+// form-action 'self', base-uri / frame-ancestors 'none'.
+//
+// style-src uses 'unsafe-inline' rather than a nonce because the lucos_navbar
+// web component creates <style> elements dynamically (including inside shadow
+// roots and document.head) — nonce-gated style-src blocks all of these.
+// Inline CSS is far less dangerous than inline JS; the critical protection here
+// is the nonce on script-src.
 func applyPageCSP(w http.ResponseWriter) (string, error) {
 	nonce, err := generateNonce()
 	if err != nil {
@@ -152,9 +159,9 @@ func applyPageCSP(w http.ResponseWriter) (string, error) {
 	csp := strings.Join([]string{
 		"default-src 'none'",
 		"script-src 'nonce-" + nonce + "'",
-		"style-src 'nonce-" + nonce + "'",
+		"style-src 'unsafe-inline'",
 		"img-src 'self' data:",
-		"connect-src 'self'",
+		"connect-src 'self' https://am.l42.eu",
 		"form-action 'self'",
 		"base-uri 'none'",
 		"frame-ancestors 'none'",
