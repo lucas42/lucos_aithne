@@ -837,7 +837,7 @@ func main() {
 
 	// Invitee enrolment flow — invite-gated, no auth required.
 	mux.HandleFunc("/enrol", handleEnrolPage(s, contacts))
-	mux.HandleFunc("/enrol/begin", handleEnrolBegin(s, wa, cs))
+	mux.HandleFunc("/enrol/begin", handleEnrolBegin(s, wa, cs, contacts))
 	mux.HandleFunc("/enrol/finish", handleEnrolFinish(s, wa, cs))
 
 	addr := fmt.Sprintf(":%s", port)

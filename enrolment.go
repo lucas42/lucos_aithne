@@ -363,7 +363,12 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 // It validates the invite (but does NOT consume it — that happens at finish),
 // begins the WebAuthn registration ceremony, and stores the session with the
 // contact_id so finish can derive it server-side.
-func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore) http.HandlerFunc {
+//
+// contacts is used to fetch the human-readable display name for the principal
+// so that passkeys are labelled with the person's real name rather than the
+// numeric contact ID. A contacts lookup failure is non-fatal: the ceremony
+// proceeds with the contact ID as the display name fallback.
+func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore, contacts *contactsClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -402,9 +407,19 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 			return
 		}
 
+		// Fetch the human-readable name from lucos_contacts so the passkey is
+		// saved with the person's actual name rather than their numeric contact ID.
+		// Non-fatal: fall back to the contact ID if the lookup fails.
+		displayName := inv.ContactID
+		if info, err := contacts.Get(inv.ContactID); err == nil {
+			displayName = info.DisplayName
+		} else {
+			log.Printf("enrol/begin: contacts lookup %q: %v — using contact ID as display name fallback", inv.ContactID, err)
+		}
+
 		// For re-enrolment: pass an empty exclude list so the ceremony always
 		// completes. The old credentials will be atomically wiped at finish time.
-		user := &webAuthnUser{principal: p, credentials: nil}
+		user := &webAuthnUser{principal: p, credentials: nil, displayName: displayName}
 
 		creation, sessionData, err := wa.BeginRegistration(user)
 		if err != nil {

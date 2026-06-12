@@ -633,10 +633,11 @@ func TestEnrolBegin_RejectsNonPost(t *testing.T) {
 	defer s.Close()
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
+	contacts := newContactsClient("http://contacts.test", "test-key")
 
 	req := httptest.NewRequest(http.MethodGet, "/enrol/begin?token=any", nil)
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for GET, got %d", rr.Code)
@@ -651,10 +652,11 @@ func TestEnrolBegin_MissingToken(t *testing.T) {
 	defer s.Close()
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
+	contacts := newContactsClient("http://contacts.test", "test-key")
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin", strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for missing token, got %d", rr.Code)
@@ -669,10 +671,11 @@ func TestEnrolBegin_InvalidToken(t *testing.T) {
 	defer s.Close()
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
+	contacts := newContactsClient("http://contacts.test", "test-key")
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token=nonexistent", strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for invalid token, got %d", rr.Code)
@@ -688,11 +691,18 @@ func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Alice Example"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
 	rawToken := createValidInvite(t, s, "alice")
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
@@ -711,6 +721,92 @@ func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
 	}
 }
 
+// TestEnrolBegin_UsesContactDisplayName verifies that the display name from
+// lucos_contacts is embedded in the WebAuthn credential creation options so
+// that authenticators show the person's real name rather than their numeric
+// contact ID.
+func TestEnrolBegin_UsesContactDisplayName(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Bob Builder"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	rawToken := createValidInvite(t, s, "42")
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// The publicKey.user.displayName field must contain the name from contacts,
+	// not the raw numeric contact ID. This is the value authenticators use when
+	// displaying or labelling the passkey.
+	var resp struct {
+		PublicKey struct {
+			User struct {
+				Name        string `json:"name"`
+				DisplayName string `json:"displayName"`
+			} `json:"user"`
+		} `json:"publicKey"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode options: %v", err)
+	}
+	if resp.PublicKey.User.DisplayName != "Bob Builder" {
+		t.Errorf("publicKey.user.displayName: got %q, want %q", resp.PublicKey.User.DisplayName, "Bob Builder")
+	}
+	if resp.PublicKey.User.Name != "Bob Builder" {
+		t.Errorf("publicKey.user.name: got %q, want %q", resp.PublicKey.User.Name, "Bob Builder")
+	}
+}
+
+// TestEnrolBegin_FallsBackToContactIDWhenContactsUnavailable verifies that if
+// the contacts service is unreachable, the enrolment ceremony still proceeds —
+// the contact ID is used as the display name fallback rather than returning an
+// error to the user.
+func TestEnrolBegin_FallsBackToContactIDWhenContactsUnavailable(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	wa := newTestWebAuthn(t)
+	cs := newCeremonyStore()
+
+	// Point at a non-existent server — contacts lookup will fail.
+	contacts := newContactsClient("http://127.0.0.1:1", "test-key")
+
+	rawToken := createValidInvite(t, s, "99")
+
+	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
+	rr := httptest.NewRecorder()
+	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+
+	// Registration should still succeed — contacts failure is non-fatal.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when contacts unavailable, got %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// The ceremony session should be stored.
+	tokenHash := store.HashToken(rawToken)
+	if _, _, ok := cs.takeEnrol(tokenHash); !ok {
+		t.Error("ceremony store should hold enrolment session data even on contacts failure")
+	}
+}
+
 func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
 	// Verifies that calling begin does not mark the invite as used —
 	// so a browser crash between begin and finish doesn't permanently burn it.
@@ -722,11 +818,18 @@ func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
 	wa := newTestWebAuthn(t)
 	cs := newCeremonyStore()
 
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Bob"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
 	rawToken := createValidInvite(t, s, "bob")
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	httptest.NewRecorder() // discard response
-	handleEnrolBegin(s, wa, cs)(httptest.NewRecorder(), req)
+	handleEnrolBegin(s, wa, cs, contacts)(httptest.NewRecorder(), req)
 
 	// Invite must still be valid after begin.
 	inv, err := s.GetInviteByRawToken(rawToken)
