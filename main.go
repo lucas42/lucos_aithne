@@ -644,6 +644,97 @@ type loginPageData struct {
 	Nonce string
 }
 
+// homePageData holds the per-request data injected into templates/index.html.
+type homePageData struct {
+	LoggedIn    bool
+	DisplayName string
+	Nonce       string
+}
+
+// handleHomePage serves GET / — the homepage.
+// It performs a soft session check: reads the aithne_session cookie and validates
+// the JWT, but does not redirect on failure (unlike requireAdminScopeFromCookie).
+// Logged-in users see their display name and a sign-out button; logged-out users
+// see the existing sign-in prompt.
+func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmplFS fs.FS) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(tmplFS, "templates/index.html"))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nonce, err := applyPageCSP(w)
+		if err != nil {
+			log.Printf("handleHomePage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		data := homePageData{Nonce: nonce}
+
+		// Soft session check — no redirect on failure.
+		if cookie, err := r.Cookie("aithne_session"); err == nil {
+			keys, kerr := s.ListVerificationKeys(token.VerificationWindow)
+			if kerr == nil {
+				keySet, kserr := token.BuildVerificationKeySet(keys)
+				if kserr == nil {
+					claims, perr := token.ParseSession(cookie.Value, keySet, issuer, "l42.eu")
+					if perr == nil {
+						data.LoggedIn = true
+						contactID := claims.Subject
+						// Resolve display name from lucos_contacts; fall back to contact ID.
+						if info, err := contacts.Get(contactID); err == nil {
+							data.DisplayName = info.DisplayName
+						} else {
+							log.Printf("handleHomePage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, err)
+							data.DisplayName = contactID
+						}
+					}
+				}
+			}
+		}
+
+		if err := tmpl.Execute(w, data); err != nil {
+			log.Printf("handleHomePage: render: %v", err)
+		}
+	}
+}
+
+// handleLogout serves POST /auth/logout.
+// It validates the Origin header as a CSRF guard (the session cookie is
+// SameSite=None, so standard SameSite CSRF protection does not apply), clears
+// the aithne_session cookie, and redirects to /.
+// See lucos-security analysis on lucos_aithne#87 for the threat-model rationale.
+func handleLogout(appOrigin string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Origin-header CSRF check. Reject any request whose Origin does not
+		// exactly match APP_ORIGIN — this covers cross-site form submissions.
+		// A missing Origin header is also rejected (conservative, but browsers
+		// always send Origin on same-origin form POSTs).
+		if r.Header.Get("Origin") != appOrigin {
+			http.Error(w, "403 Forbidden — invalid origin", http.StatusForbidden)
+			return
+		}
+		// Clear the session cookie. MaxAge: -1 sends Max-Age=0 in the header,
+		// which instructs the browser to delete the cookie immediately.
+		http.SetCookie(w, &http.Cookie{
+			Name:     "aithne_session",
+			Value:    "",
+			Domain:   "l42.eu",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
+			MaxAge:   -1,
+		})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
 // handleLoginPage serves the login page as a Go template, injecting a fresh
 // per-request nonce into the <script> and <style> tags so the Content-Security-
 // Policy can be locked to 'nonce-{nonce}' without requiring hashes or 'unsafe-inline'.
@@ -806,8 +897,8 @@ func main() {
 	// OIDC discovery document (ADR §1).
 	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(issuer))
 
-	// Index page — serves the root path only (/{$} prevents catch-all matching).
-	mux.HandleFunc("/{$}", serveStaticFile(staticFS, "static/index.html"))
+	// Index page — dynamic template handler so it can reflect the user's login state.
+	mux.HandleFunc("/{$}", handleHomePage(s, issuer, contacts, templateFS))
 
 	// Favicon — served from both paths; /favicon.ico handles the legacy automatic browser request.
 	mux.HandleFunc("/favicon.svg", serveStaticFile(staticFS, "static/favicon.svg"))
@@ -816,12 +907,19 @@ func main() {
 	// lucOS navbar web-component bundle (compiled JS, embedded at build time).
 	mux.HandleFunc("/lucos_navbar.js", serveStaticFile(staticFS, "static/lucos_navbar.js"))
 
+	// Shared stylesheet and JS helpers used by all aithne pages.
+	mux.HandleFunc("/aithne.css", serveStaticFile(staticFS, "static/aithne.css"))
+	mux.HandleFunc("/aithne.js", serveStaticFile(staticFS, "static/aithne.js"))
+
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
 
 	// WebAuthn login ceremony endpoints.
 	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
+
+	// Logout endpoint — clears the session cookie and redirects to /.
+	mux.HandleFunc("/auth/logout", handleLogout(issuer))
 
 	// OAuth2/OIDC endpoints (ADR §1, §5).
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))
