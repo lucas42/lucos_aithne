@@ -6,6 +6,12 @@ services:
     restart: always
     ports:
       - $PORT:$PORT
+    # Resolve host.docker.internal to the host gateway so the container can reach
+    # other services published on the host (e.g. lucos_contacts on port 8013) by a
+    # stable, Docker-managed name rather than a hardcoded bridge IP. On Docker Desktop
+    # this name is built in; on Linux Docker Engine it must be mapped explicitly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - PORT
       - SYSTEM
