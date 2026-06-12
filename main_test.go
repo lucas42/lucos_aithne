@@ -132,9 +132,9 @@ func mintBearerToken(t *testing.T, s *store.Store, scopes []string) string {
 // newAdminMux builds a test ServeMux with only the admin and enrolment endpoints registered.
 func newAdminMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development"))
-	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	contacts := newContactsClient("http://contacts.test", "test-key")
+	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
+	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
 	return mux
@@ -364,6 +364,107 @@ func TestAdminGrantsPage_ContactNotFound(t *testing.T) {
 	// Should not expose internal error details or render a grants table.
 	if strings.Contains(body, "<table") {
 		t.Error("expected no grants table for unknown contact")
+	}
+}
+
+// TestAdminGrantsPage_ShowsDisplayName verifies that when lucos_contacts returns a
+// display name for the looked-up contact, that name appears in the rendered page.
+func TestAdminGrantsPage_ShowsDisplayName(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	admin, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin-dn")
+	if err != nil {
+		t.Fatalf("create admin principal: %v", err)
+	}
+	adminTok, err := token.MintSession(admin, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint admin token: %v", err)
+	}
+
+	// Set up target principal.
+	if _, err := s.CreatePrincipal(store.PrincipalClassHuman, "alice"); err != nil {
+		t.Fatalf("create target principal: %v", err)
+	}
+
+	// Mock contacts server that returns a display name.
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"Alice Example"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants?contact_id=alice", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: adminTok})
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Alice Example") {
+		t.Errorf("expected display name %q in page body, got: %s", "Alice Example", body)
+	}
+	if !strings.Contains(body, "alice") {
+		t.Errorf("expected contact ID %q in page body, got: %s", "alice", body)
+	}
+}
+
+// TestAdminGrantsPage_FallsBackToContactIDWhenContactsUnavailable verifies that if
+// lucos_contacts is unreachable after a successful principal lookup, the page still
+// renders using the contact ID as the display name fallback.
+func TestAdminGrantsPage_FallsBackToContactIDWhenContactsUnavailable(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	admin, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin-fb")
+	if err != nil {
+		t.Fatalf("create admin principal: %v", err)
+	}
+	adminTok, err := token.MintSession(admin, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint admin token: %v", err)
+	}
+
+	if _, err := s.CreatePrincipal(store.PrincipalClassHuman, "bob"); err != nil {
+		t.Fatalf("create target principal: %v", err)
+	}
+
+	// Contacts is unreachable.
+	contacts := newContactsClient("http://127.0.0.1:1", "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants?contact_id=bob", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: adminTok})
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when contacts unavailable, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	// Should still render with contact ID as display name fallback — no crash.
+	if !strings.Contains(body, "bob") {
+		t.Errorf("expected contact ID %q in page body as fallback name, got: %s", "bob", body)
 	}
 }
 
@@ -1430,6 +1531,10 @@ func TestAdminInvites_Success(t *testing.T) {
 	}
 	if resp["expires_at"] == "" {
 		t.Error("expected non-empty expires_at in response")
+	}
+	// display_name should be populated from lucos_contacts.
+	if resp["display_name"] != "Alice Example" {
+		t.Errorf("expected display_name %q in response, got %q", "Alice Example", resp["display_name"])
 	}
 }
 
