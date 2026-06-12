@@ -132,7 +132,7 @@ func mintBearerToken(t *testing.T, s *store.Store, scopes []string) string {
 // newAdminMux builds a test ServeMux with only the admin and enrolment endpoints registered.
 func newAdminMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/admin/grants", requireAdminScope(s, testIssuer, handleGrants(s, testMainVocab)))
+	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development"))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	contacts := newContactsClient("http://contacts.test", "test-key")
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
@@ -233,12 +233,137 @@ func TestAdminGrants_RejectsNoToken(t *testing.T) {
 		t.Fatalf("signing key: %v", err)
 	}
 
+	// GET without any Authorization header → treated as a browser navigation →
+	// redirects to /auth/login (no cookie present) rather than returning 401.
 	req := httptest.NewRequest(http.MethodGet, "/admin/grants?principal_id=x", nil)
 	rr := httptest.NewRecorder()
 	newAdminMux(s).ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rr.Code)
+	if rr.Code != http.StatusFound {
+		t.Errorf("expected 302 redirect to login, got %d", rr.Code)
+	}
+	if !strings.HasPrefix(rr.Header().Get("Location"), "/auth/login") {
+		t.Errorf("expected redirect to /auth/login, got Location: %s", rr.Header().Get("Location"))
+	}
+}
+
+// TestAdminGrantsPage_ServesHTML verifies that GET /admin/grants with a valid
+// admin session cookie (and no Authorization header) returns an HTML page.
+func TestAdminGrantsPage_ServesHTML(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin")
+	if err != nil {
+		t.Fatalf("create principal: %v", err)
+	}
+	tok, err := token.MintSession(p, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: tok})
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("expected text/html Content-Type, got %s", ct)
+	}
+}
+
+// TestAdminGrantsPage_ContactLookup verifies that a contact_id query param
+// causes the page to render the principal's active grants in the response body.
+func TestAdminGrantsPage_ContactLookup(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	admin, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin-2")
+	if err != nil {
+		t.Fatalf("create admin principal: %v", err)
+	}
+	adminTok, err := token.MintSession(admin, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint admin token: %v", err)
+	}
+
+	target, err := s.CreatePrincipal(store.PrincipalClassHuman, "target-contact")
+	if err != nil {
+		t.Fatalf("create target principal: %v", err)
+	}
+	if _, err := s.CreateGrant(target.ID, "aithne:admin", "development", "page-admin-2", testMainVocab); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants?contact_id=target-contact", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: adminTok})
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "aithne:admin") {
+		t.Errorf("expected grant scope in page body, got: %s", body)
+	}
+	if !strings.Contains(body, target.ID) {
+		t.Errorf("expected principal ID in page body, got: %s", body)
+	}
+}
+
+// TestAdminGrantsPage_ContactNotFound verifies that looking up a contact ID
+// that has no registered principal renders an error message rather than crashing.
+func TestAdminGrantsPage_ContactNotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	admin, err := s.CreatePrincipal(store.PrincipalClassHuman, "page-admin-3")
+	if err != nil {
+		t.Fatalf("create admin principal: %v", err)
+	}
+	adminTok, err := token.MintSession(admin, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint admin token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants?contact_id=no-such-contact", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: adminTok})
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (error rendered in page), got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "no-such-contact") {
+		t.Errorf("expected the searched contact ID in the error message, body: %s", body)
+	}
+	// Should not expose internal error details or render a grants table.
+	if strings.Contains(body, "<table") {
+		t.Error("expected no grants table for unknown contact")
 	}
 }
 
@@ -3294,6 +3419,71 @@ func TestHomePage_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected HTTP 405, got %d", rr.Code)
+	}
+}
+
+// TestHomePage_Admin_ShowsGrantsLink verifies that a session with aithne:admin
+// scope causes the "Manage grants" link to appear on the home page.
+func TestHomePage_Admin_ShowsGrantsLink(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	contacts := newContactsClient("http://unused.test", "key")
+
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "admin-for-home")
+	if err != nil {
+		t.Fatalf("create principal: %v", err)
+	}
+	tok, err := token.MintSession(p, []string{"aithne:admin"}, key, testIssuer, testAudience, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "aithne_session", Value: tok})
+	rr := httptest.NewRecorder()
+	handleHomePage(s, testIssuer, contacts, templateFS)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "/admin/grants") {
+		t.Errorf("expected Manage grants link in admin home page, body: %s", body)
+	}
+}
+
+// TestHomePage_NonAdmin_HidesGrantsLink verifies that a session without
+// aithne:admin scope does not show the "Manage grants" link.
+func TestHomePage_NonAdmin_HidesGrantsLink(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	contacts := newContactsClient("http://unused.test", "key")
+
+	cookie := mintSessionCookie(t, s, "non-admin-user")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	handleHomePage(s, testIssuer, contacts, templateFS)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "/admin/grants") {
+		t.Errorf("expected no grants link for non-admin session, body: %s", body)
 	}
 }
 

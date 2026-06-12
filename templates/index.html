@@ -29,6 +29,9 @@
     <p class="subtitle">Aithne — authentication service</p>
     {{if .LoggedIn}}
     <p>You are signed in as <strong>{{.DisplayName}}</strong>.</p>
+    {{if .IsAdmin}}
+    <p><a href="/admin/grants" class="action">Manage grants →</a></p>
+    {{end}}
     <form method="post" action="/auth/logout">
       <button type="submit" class="action">Sign out</button>
     </form>
