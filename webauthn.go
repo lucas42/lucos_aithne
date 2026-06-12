@@ -152,11 +152,36 @@ func (cs *ceremonyStore) takeEnrol(tokenHash string) (*gwebauthn.SessionData, st
 type webAuthnUser struct {
 	principal   *store.Principal
 	credentials []gwebauthn.Credential
+	// displayName is the human-readable name fetched from lucos_contacts.
+	// Used for WebAuthnDisplayName (and WebAuthnName) so the passkey UI shows
+	// a real name instead of the numeric contact ID. Falls back to ExternalID
+	// if empty (e.g. when contacts is unreachable during enrolment begin).
+	displayName string
 }
 
-func (u *webAuthnUser) WebAuthnID() []byte                          { return []byte(u.principal.ID) }
-func (u *webAuthnUser) WebAuthnName() string                        { return u.principal.ExternalID }
-func (u *webAuthnUser) WebAuthnDisplayName() string                 { return u.principal.ExternalID }
+func (u *webAuthnUser) WebAuthnID() []byte { return []byte(u.principal.ID) }
+
+// WebAuthnName returns the human-palatable account identifier shown in the
+// passkey UI. Uses the contacts display name when available; falls back to the
+// numeric contact ID (ExternalID) so registration always succeeds even if the
+// contacts service is temporarily unavailable.
+func (u *webAuthnUser) WebAuthnName() string {
+	if u.displayName != "" {
+		return u.displayName
+	}
+	return u.principal.ExternalID
+}
+
+// WebAuthnDisplayName returns the human-readable display name for the user,
+// used by authenticators (browsers, OS prompts) when listing passkeys.
+// Uses the contacts display name when available; falls back to ExternalID.
+func (u *webAuthnUser) WebAuthnDisplayName() string {
+	if u.displayName != "" {
+		return u.displayName
+	}
+	return u.principal.ExternalID
+}
+
 func (u *webAuthnUser) WebAuthnCredentials() []gwebauthn.Credential { return u.credentials }
 
 // loadWebAuthnUser loads a principal by (class=human, externalID=contactID) and
