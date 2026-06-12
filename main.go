@@ -1026,6 +1026,7 @@ func main() {
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
+	mux.HandleFunc("/admin/invites/", requireAdminScope(s, issuer, handleAdminInviteByHash(s)))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, issuer, handleAdminMachineKeys(s)))
 	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))

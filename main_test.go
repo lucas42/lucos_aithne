@@ -137,6 +137,7 @@ func newAdminMux(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
+	mux.HandleFunc("/admin/invites/", requireAdminScope(s, testIssuer, handleAdminInviteByHash(s)))
 	return mux
 }
 
@@ -3674,5 +3675,308 @@ func TestLogout_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected HTTP 405, got %d", rr.Code)
+	}
+}
+
+// --- Admin invite revocation tests ---
+
+// TestAdminInvites_Success_IncludesTokenHash verifies that the POST /admin/invites
+// response now includes a token_hash field so the admin UI can offer revocation.
+func TestAdminInvites_Success_IncludesTokenHash(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	contactsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":42,"name":"Alice Example"}`)
+	}))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
+
+	body, _ := json.Marshal(map[string]string{"contact_id": "42"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/invites", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["token_hash"] == "" {
+		t.Error("expected non-empty token_hash in POST /admin/invites response")
+	}
+	// token_hash must be a 64-char hex SHA-256 digest.
+	if len(resp["token_hash"]) != 64 {
+		t.Errorf("token_hash should be 64 hex chars (SHA-256), got %q (len %d)", resp["token_hash"], len(resp["token_hash"]))
+	}
+}
+
+// TestAdminInviteByHash_Revoke verifies that DELETE /admin/invites/{hash} marks
+// the invite as used, returning 204 No Content.
+func TestAdminInviteByHash_Revoke(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	rawToken := createValidInvite(t, s, "revoke-contact")
+	tokenHash := store.HashToken(rawToken)
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/invites/"+tokenHash, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// Invite must now be marked as used.
+	inv, err := s.GetInviteByHash(tokenHash)
+	if err != nil {
+		t.Fatalf("GetInviteByHash after revoke: %v", err)
+	}
+	if inv.UsedAt == nil {
+		t.Error("invite.UsedAt should be set after revocation")
+	}
+}
+
+// TestAdminInviteByHash_Revoke_NotFound verifies that revoking a non-existent
+// hash returns 404.
+func TestAdminInviteByHash_Revoke_NotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/invites/deadbeef00000000000000000000000000000000000000000000000000000000", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+// TestAdminInviteByHash_Revoke_AlreadyUsed verifies that revoking an already-used
+// invite returns 409 Conflict.
+func TestAdminInviteByHash_Revoke_AlreadyUsed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	rawToken := createValidInvite(t, s, "already-used-contact")
+	tokenHash := store.HashToken(rawToken)
+
+	// First revocation — should succeed.
+	req1 := httptest.NewRequest(http.MethodDelete, "/admin/invites/"+tokenHash, nil)
+	req1.Header.Set("Authorization", "Bearer "+tok)
+	rr1 := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusNoContent {
+		t.Fatalf("first revoke: expected 204, got %d", rr1.Code)
+	}
+
+	// Second revocation — should return 409.
+	req2 := httptest.NewRequest(http.MethodDelete, "/admin/invites/"+tokenHash, nil)
+	req2.Header.Set("Authorization", "Bearer "+tok)
+	rr2 := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusConflict {
+		t.Errorf("second revoke: expected 409, got %d", rr2.Code)
+	}
+}
+
+// TestAdminInviteByHash_Revoke_RequiresAdmin verifies the endpoint rejects
+// requests without an admin-scoped token.
+func TestAdminInviteByHash_Revoke_RequiresAdmin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	rawToken := createValidInvite(t, s, "contact-protected")
+	tokenHash := store.HashToken(rawToken)
+
+	// No token at all.
+	req := httptest.NewRequest(http.MethodDelete, "/admin/invites/"+tokenHash, nil)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("no token: expected 401, got %d", rr.Code)
+	}
+
+	// Token without admin scope.
+	nonAdminTok := mintBearerToken(t, s, []string{"render-ui"})
+	req2 := httptest.NewRequest(http.MethodDelete, "/admin/invites/"+tokenHash, nil)
+	req2.Header.Set("Authorization", "Bearer "+nonAdminTok)
+	rr2 := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusForbidden {
+		t.Errorf("non-admin token: expected 403, got %d", rr2.Code)
+	}
+}
+
+// TestAdminInviteByHash_Revoke_MethodNotAllowed verifies that GET on the revoke
+// endpoint returns 405.
+func TestAdminInviteByHash_Revoke_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	rawToken := createValidInvite(t, s, "method-not-allowed-contact")
+	tokenHash := store.HashToken(rawToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/invites/"+tokenHash, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+// TestStore_GetInviteByHash verifies that GetInviteByHash looks up by the hash
+// directly, without re-hashing.
+func TestStore_GetInviteByHash(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rawToken := "hash-lookup-test-token"
+	if _, err := s.CreateInvite(rawToken, "contact-x", "admin"); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	hash := store.HashToken(rawToken)
+	inv, err := s.GetInviteByHash(hash)
+	if err != nil {
+		t.Fatalf("GetInviteByHash: %v", err)
+	}
+	if inv.TokenHash != hash {
+		t.Errorf("TokenHash: got %q, want %q", inv.TokenHash, hash)
+	}
+	if inv.ContactID != "contact-x" {
+		t.Errorf("ContactID: got %q, want %q", inv.ContactID, "contact-x")
+	}
+
+	// Passing the raw token (not the hash) should NOT find the record.
+	_, err = s.GetInviteByHash(rawToken)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetInviteByHash(rawToken) should return ErrNotFound, got %v", err)
+	}
+}
+
+// TestStore_RevokeInviteByHash_Success verifies that RevokeInviteByHash sets
+// used_at on a valid invite.
+func TestStore_RevokeInviteByHash_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rawToken := "revoke-test-token"
+	if _, err := s.CreateInvite(rawToken, "contact-y", "admin"); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	hash := store.HashToken(rawToken)
+	if err := s.RevokeInviteByHash(hash); err != nil {
+		t.Fatalf("RevokeInviteByHash: %v", err)
+	}
+
+	// Fetching by hash should now show UsedAt set.
+	inv, err := s.GetInviteByHash(hash)
+	if err != nil {
+		t.Fatalf("GetInviteByHash after revoke: %v", err)
+	}
+	if inv.UsedAt == nil {
+		t.Error("UsedAt should be non-nil after revocation")
+	}
+}
+
+// TestStore_RevokeInviteByHash_NotFound verifies that revoking a non-existent
+// hash returns ErrNotFound.
+func TestStore_RevokeInviteByHash_NotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	err = s.RevokeInviteByHash("0000000000000000000000000000000000000000000000000000000000000000")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestStore_RevokeInviteByHash_AlreadyUsed verifies that revoking a used invite
+// returns ErrInviteUsed.
+func TestStore_RevokeInviteByHash_AlreadyUsed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	rawToken := "double-revoke-token"
+	if _, err := s.CreateInvite(rawToken, "contact-z", "admin"); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+
+	hash := store.HashToken(rawToken)
+	// First revocation.
+	if err := s.RevokeInviteByHash(hash); err != nil {
+		t.Fatalf("first RevokeInviteByHash: %v", err)
+	}
+	// Second revocation.
+	err = s.RevokeInviteByHash(hash)
+	if !errors.Is(err, store.ErrInviteUsed) {
+		t.Errorf("expected ErrInviteUsed on double-revoke, got %v", err)
 	}
 }

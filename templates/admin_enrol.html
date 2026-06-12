@@ -50,6 +50,25 @@
       color: #777;
       margin-top: .375rem;
     }
+    .revoke-btn {
+      display: inline-block;
+      width: auto;
+      padding: .375rem .75rem;
+      font-size: .8rem;
+      background: #c0392b;
+      color: #fff;
+      margin-top: .5rem;
+      margin-left: .5rem;
+    }
+    .revoke-btn:hover { background: #922b21; }
+    .revoke-btn[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events: none; }
+    .revoked-notice {
+      margin-top: .625rem;
+      font-size: .8rem;
+      color: #c0392b;
+      font-weight: 500;
+    }
+    .revoked-notice[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -73,7 +92,9 @@
       <p>Send this link to the contact. It expires in 24 hours and can only be used once.</p>
       <output class="result-url" id="inviteUrl" aria-label="Invite URL" aria-live="polite"></output>
       <button class="copy-btn" id="copyBtn" type="button">Copy link</button>
+      <button class="revoke-btn" id="revokeBtn" type="button">Revoke invite</button>
       <p class="expires" id="expiresText"></p>
+      <p class="revoked-notice" id="revokedNotice" role="status" hidden>Invite revoked. The link is no longer usable.</p>
     </div>
   </div>
 
@@ -82,13 +103,18 @@
     // HttpOnly, so JavaScript cannot read it from document.cookie.
     const sessionToken = {{.SessionToken | js}};
 
-    const form      = document.getElementById('inviteForm');
-    const btn       = document.getElementById('submitBtn');
-    const errorBox  = document.getElementById('errorBox');
-    const resultBox = document.getElementById('resultBox');
-    const urlEl     = document.getElementById('inviteUrl');
-    const copyBtn   = document.getElementById('copyBtn');
-    const expiresEl = document.getElementById('expiresText');
+    const form          = document.getElementById('inviteForm');
+    const btn           = document.getElementById('submitBtn');
+    const errorBox      = document.getElementById('errorBox');
+    const resultBox     = document.getElementById('resultBox');
+    const urlEl         = document.getElementById('inviteUrl');
+    const copyBtn       = document.getElementById('copyBtn');
+    const revokeBtn     = document.getElementById('revokeBtn');
+    const revokedNotice = document.getElementById('revokedNotice');
+    const expiresEl     = document.getElementById('expiresText');
+
+    // Holds the token_hash of the currently displayed invite, for revocation.
+    let currentTokenHash = null;
 
     function showError(msg) {
       errorBox.textContent = msg;
@@ -145,6 +171,10 @@
         }
         urlEl.textContent = data.invite_url;
         expiresEl.textContent = 'Expires: ' + new Date(data.expires_at).toLocaleString();
+        currentTokenHash = data.token_hash || null;
+        revokeBtn.setAttribute('aria-disabled', 'false');
+        revokeBtn.hidden = false;
+        revokedNotice.hidden = true;
         resultBox.hidden = false;
       } catch (_) {
         showError('Something went wrong. Try again.');
@@ -165,6 +195,42 @@
         range.selectNode(urlEl);
         window.getSelection().removeAllRanges();
         window.getSelection().addRange(range);
+      }
+    });
+
+    revokeBtn.addEventListener('click', async function() {
+      if (!currentTokenHash) { return; }
+      revokeBtn.setAttribute('aria-disabled', 'true');
+      clearError();
+      try {
+        const resp = await fetch('/admin/invites/' + currentTokenHash, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + sessionToken },
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          if (resp.status === 401 || resp.status === 403) {
+            showError('Access denied. Make sure you are signed in with an admin account.');
+          } else if (resp.status === 404) {
+            showError('Invite not found. It may have already expired.');
+          } else if (resp.status === 409) {
+            showError('Invite has already been used or revoked.');
+          } else {
+            showError('Could not revoke invite: ' + text.trim());
+          }
+          revokeBtn.setAttribute('aria-disabled', 'false');
+          return;
+        }
+        // Success — mark as revoked in the UI.
+        urlEl.textContent = '';
+        copyBtn.hidden = true;
+        revokeBtn.hidden = true;
+        expiresEl.textContent = '';
+        revokedNotice.hidden = false;
+        currentTokenHash = null;
+      } catch (_) {
+        showError('Something went wrong. Try again.');
+        revokeBtn.setAttribute('aria-disabled', 'false');
       }
     });
   </script>

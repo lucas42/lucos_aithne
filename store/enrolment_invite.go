@@ -84,6 +84,54 @@ func (s *Store) GetInviteByRawToken(rawToken string) (*EnrolmentInvite, error) {
 	return inv, nil
 }
 
+// GetInviteByHash looks up an invite directly by its stored token_hash
+// (hex-encoded SHA-256). Unlike GetInviteByRawToken it does not re-hash the
+// input — the caller supplies the hash as it appears in the database.
+// Returns ErrNotFound if no matching row exists.
+// Does not validate expiry or used_at — callers must check IsValid or inspect
+// fields directly.
+func (s *Store) GetInviteByHash(tokenHash string) (*EnrolmentInvite, error) {
+	row := s.db.QueryRow(
+		`SELECT token_hash, contact_id, created_by, created_at, expires_at, used_at
+		 FROM enrolment_invites WHERE token_hash = ?`,
+		tokenHash,
+	)
+	return scanInvite(row)
+}
+
+// RevokeInviteByHash marks the invite identified by tokenHash as used (revoked),
+// preventing it from being consumed at enrolment. This is the admin revocation path.
+// Returns ErrNotFound if no invite with that hash exists.
+// Returns ErrInviteUsed if the invite was already consumed or previously revoked.
+func (s *Store) RevokeInviteByHash(tokenHash string) error {
+	// Fetch first so we can distinguish ErrNotFound from ErrInviteUsed.
+	inv, err := s.GetInviteByHash(tokenHash)
+	if err != nil {
+		return err // ErrNotFound or scan error
+	}
+	if inv.UsedAt != nil {
+		return ErrInviteUsed
+	}
+
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		`UPDATE enrolment_invites SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`,
+		now.Format(time.RFC3339), tokenHash,
+	)
+	if err != nil {
+		return fmt.Errorf("store: revoke invite: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: revoke invite rows-affected: %w", err)
+	}
+	if n == 0 {
+		// Race: invite was used between our check and the UPDATE.
+		return ErrInviteUsed
+	}
+	return nil
+}
+
 // --- Internal helpers ---
 
 func scanInvite(row *sql.Row) (*EnrolmentInvite, error) {
