@@ -75,19 +75,21 @@
       btn.textContent = yes ? 'Waiting for passkey…' : 'Sign in with passkey';
     }
 
-    // Redirect to ?next= only if it is a same-origin path.
-    function safeRedirect() {
+    // Build the finish endpoint URL, forwarding the page's ?next= param so the
+    // server can validate and return a safe redirect target.
+    function finishUrl(sessionId) {
+      const params = new URLSearchParams();
+      if (sessionId) params.set('session', sessionId);
       const next = new URLSearchParams(window.location.search).get('next');
-      if (next) {
-        try {
-          const url = new URL(next, window.location.origin);
-          if (url.origin === window.location.origin) {
-            window.location.href = url.href;
-            return;
-          }
-        } catch (_) {}
-      }
-      window.location.href = '/';
+      if (next) params.set('next', next);
+      const qs = params.toString();
+      return '/auth/login/finish' + (qs ? '?' + qs : '');
+    }
+
+    // Follow the server-validated redirect from a finish response.
+    // Falls back to '/' if the response body is missing or malformed.
+    function followRedirect(data) {
+      window.location.href = (data && data.redirect) ? data.redirect : '/';
     }
 
     // ── Discoverable login (button-triggered) ────────────────────────────────
@@ -128,8 +130,7 @@
           return;
         }
 
-        const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
-        const finishResp = await fetch(url, {
+        const finishResp = await fetch(finishUrl(sessionId), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(encodeAssertion(assertion)),
@@ -143,7 +144,7 @@
           return;
         }
 
-        safeRedirect();
+        followRedirect(await finishResp.json());
       } catch (_) {
         showError('Something went wrong. Try again, or come back later.');
       } finally {
@@ -190,13 +191,12 @@
 
         // Pass the session token so the server can match the begin session and
         // identify the principal from the assertion's userHandle.
-        const url = '/auth/login/finish' + (sessionId ? '?session=' + encodeURIComponent(sessionId) : '');
-        const finishResp = await fetch(url, {
+        const finishResp = await fetch(finishUrl(sessionId), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(encodeAssertion(assertion)),
         });
-        if (finishResp.ok) safeRedirect();
+        if (finishResp.ok) followRedirect(await finishResp.json());
         else showError('Sign-in failed. Try clicking the sign-in button instead.');
       } catch (err) {
         if (err.name !== 'AbortError') {

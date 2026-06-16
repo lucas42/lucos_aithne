@@ -456,8 +456,17 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		}
 		token.SetSessionCookie(w, tok, environment)
 
+		// Determine safe redirect target. The client passes the `next` query
+		// param it found on the login page URL; we validate it server-side so
+		// the JS only needs to follow whatever the server returns.
+		next := r.URL.Query().Get("next")
+		redirect := "/"
+		if isAllowedRedirect(next) {
+			redirect = next
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "redirect": redirect})
 	}
 }
 
