@@ -198,46 +198,6 @@
         <p class="empty">No machine keys.</p>
         {{end}}
 
-        {{/* ── Provision new key ────────────────────────────────────── */}}
-        <hr class="section-sep">
-        <p class="provision-heading">Provision a new machine key</p>
-        <form id="provisionForm" novalidate>
-          <button type="submit" id="provisionBtn">Provision machine key</button>
-        </form>
-
-        <div class="secret-panel" id="secretPanel" role="region"
-             aria-label="New machine key — one-time secret" hidden>
-          <div class="secret-warning" role="alert">
-            <strong>Store this now — it cannot be shown again.</strong>
-            aithne stores only a hash of the secret. Once you navigate away, it is gone.
-          </div>
-          <p>
-            Copy <code>client_secret</code> and save it as
-            <code>AITHNE_CLIENT_SECRET</code> in <code>lucos_agent/development</code>
-            via lucos_creds now.
-          </p>
-          <div class="secret-field">
-            <label for="secretClientId">client_id</label>
-            <input type="text" id="secretClientId" readonly autocomplete="off">
-          </div>
-          <div class="secret-field">
-            <label for="secretValue">client_secret</label>
-            <div class="secret-copy-row">
-              <input type="text" id="secretValue" readonly autocomplete="off">
-              <button type="button" class="copy-btn" id="copySecretBtn"
-                      aria-label="Copy client secret to clipboard">Copy</button>
-            </div>
-          </div>
-          <div class="secret-field">
-            <label for="secretPrincipalId">principal_id</label>
-            <input type="text" id="secretPrincipalId" readonly autocomplete="off">
-          </div>
-          <div class="secret-field">
-            <label for="secretCredentialId">credential_id</label>
-            <input type="text" id="secretCredentialId" readonly autocomplete="off">
-          </div>
-        </div>
-
         {{/* ── Grants ────────────────────────────────────────────────── */}}
         <hr class="section-sep">
         <h2 id="grantsHeading">Grants for <strong>{{.Slug}}</strong></h2>
@@ -300,6 +260,50 @@
         </form>
 
       {{end}}
+
+      {{/* ── Provision new key — shown whenever a slug is specified, ── */}}
+      {{/* even if no principal exists yet (POST /admin/machine-keys    */}}
+      {{/* auto-creates the principal on first provision).              */}}
+      <hr class="section-sep">
+      <p class="provision-heading">Provision a new machine key for <strong>{{.Slug}}</strong></p>
+      <form id="provisionForm" novalidate>
+        <button type="submit" id="provisionBtn">Provision machine key</button>
+      </form>
+
+      <div class="secret-panel" id="secretPanel" role="region"
+           aria-label="New machine key — one-time secret" hidden>
+        <div class="secret-warning" role="alert">
+          <strong>Store this now — it cannot be shown again.</strong>
+          aithne stores only a hash of the secret. Once you navigate away, it is gone.
+        </div>
+        <p>
+          Copy <code>client_secret</code> and save it to lucos_creds as
+          <code>LUCOS_&lt;PERSONA&gt;_AITHNE_CLIENT_SECRET</code> in
+          <code>lucos_agent/development</code>
+          (e.g. <code>LUCOS_ARCHITECT_AITHNE_CLIENT_SECRET</code> for <code>lucos-architect</code>).
+        </p>
+        <div class="secret-field">
+          <label for="secretClientId">client_id</label>
+          <input type="text" id="secretClientId" readonly autocomplete="off">
+        </div>
+        <div class="secret-field">
+          <label for="secretValue">client_secret</label>
+          <div class="secret-copy-row">
+            <input type="text" id="secretValue" readonly autocomplete="off">
+            <button type="button" class="copy-btn" id="copySecretBtn"
+                    aria-label="Copy client secret to clipboard">Copy</button>
+          </div>
+        </div>
+        <div class="secret-field">
+          <label for="secretPrincipalId">principal_id</label>
+          <input type="text" id="secretPrincipalId" readonly autocomplete="off">
+        </div>
+        <div class="secret-field">
+          <label for="secretCredentialId">credential_id</label>
+          <input type="text" id="secretCredentialId" readonly autocomplete="off">
+        </div>
+      </div>
+
     {{end}}
   </div>
 
