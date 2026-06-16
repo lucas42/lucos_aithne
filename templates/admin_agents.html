@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- Placeholder template — full UI to be implemented by lucos-ux (lucos_aithne#120). -->
+<!-- Data contract (Go type adminAgentsPageData):
+     .Nonce              string         — CSP nonce for inline script/style
+     .SessionToken       string         — raw JWT for AJAX Bearer auth
+     .Scopes             []string       — sorted vocabulary for grant <select>
+     .DefaultEnvironment string         — pre-fills environment field
+     .Slug               string         — agent slug from ?slug=X
+     .PrincipalID        string         — resolved principal UUID (empty if not found)
+     .Credentials        []credentialJSON — machine keys {ID, Label, CreatedAt, RevokedBy?, RevokedAt?}
+     .Grants             []grantJSON    — grants {ID, PrincipalID, Scope, Environment, GrantedBy, GrantedAt, RevokedBy?, RevokedAt?}
+     .LookupError        string         — non-empty on lookup failure
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Admin — lucOS</title>
+  <link rel="stylesheet" href="/aithne.css">
+</head>
+<body>
+  <lucos-navbar></lucos-navbar>
+  <script nonce="{{.Nonce}}" src="/lucos_navbar.js"></script>
+  <main>
+    <h1>Agent Administration</h1>
+    <p><em>Full UI coming soon. Use the API endpoints directly in the meantime.</em></p>
+    {{if .LookupError}}<p class="error-box">{{.LookupError}}</p>{{end}}
+    {{if .Slug}}
+      <h2>Agent: {{.Slug}}</h2>
+      <p>Principal ID: <code>{{.PrincipalID}}</code></p>
+      <h3>Machine Keys</h3>
+      {{if .Credentials}}
+      <ul>
+        {{range .Credentials}}
+        <li>{{.Label}} — created {{.CreatedAt}}{{if .RevokedAt}} (revoked {{.RevokedAt}}){{end}}</li>
+        {{end}}
+      </ul>
+      {{else}}<p>No machine keys.</p>{{end}}
+      <h3>Grants</h3>
+      {{if .Grants}}
+      <ul>
+        {{range .Grants}}
+        <li>{{.Scope}} in {{.Environment}} — granted {{.GrantedAt}}{{if .RevokedAt}} (revoked {{.RevokedAt}}){{end}}</li>
+        {{end}}
+      </ul>
+      {{else}}<p>No grants.</p>{{end}}
+    {{end}}
+  </main>
+</body>
+</html>

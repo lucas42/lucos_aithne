@@ -1836,12 +1836,13 @@ func TestCeremonyStore_OneTimeUse(t *testing.T) {
 
 // --- Machine/agent authentication tests ---
 
-// newMachineAuthMux builds a test ServeMux with the oauth2/token and
-// admin/machine-keys endpoints registered.
+// newMachineAuthMux builds a test ServeMux with the oauth2/token,
+// admin/machine-keys, and admin/machine-keys/{id} endpoints registered.
 func newMachineAuthMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, testIssuer, "development"))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
+	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, testIssuer, handleAdminMachineKeyByID(s)))
 	return mux
 }
 
@@ -2176,6 +2177,257 @@ func TestAdminMachineKeys_MissingSlug(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+}
+
+// TestClientCredentials_RevokedKey verifies that a revoked machine key cannot
+// be used to obtain a token. This is the security-critical path: without the
+// revoked_at filter in handleClientCredentialsGrant, revocation would be cosmetic.
+func TestClientCredentials_RevokedKey(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-revoke-test-agent")
+
+	// Find the credential ID so we can revoke it.
+	p, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, "lucos-revoke-test-agent")
+	if err != nil {
+		t.Fatalf("GetPrincipalByExternalID: %v", err)
+	}
+	creds, err := s.ListCredentialsByPrincipal(p.ID)
+	if err != nil || len(creds) == 0 {
+		t.Fatalf("ListCredentialsByPrincipal: %v, len=%d", err, len(creds))
+	}
+	if err := s.RevokeCredential(creds[0].ID, "test-revoker"); err != nil {
+		t.Fatalf("RevokeCredential: %v", err)
+	}
+
+	// The revoked key must no longer work.
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-revoke-test-agent&client_secret=" + rawSecret)
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for revoked key, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- Admin machine-key revocation tests ---
+
+// newAgentsMux builds a test ServeMux covering the agents + machine-key routes.
+func newAgentsMux(s *store.Store, vocab *store.Vocabulary) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/agents", handleAgents(s, vocab, testIssuer, "development"))
+	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
+	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, testIssuer, handleAdminMachineKeyByID(s)))
+	return mux
+}
+
+func TestAdminMachineKeyRevoke_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	provisionMachineKey(t, s, "lucos-revoke-agent")
+	p, _ := s.GetPrincipalByExternalID(store.PrincipalClassAgent, "lucos-revoke-agent")
+	creds, _ := s.ListCredentialsByPrincipal(p.ID)
+	credID := creds[0].ID
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/machine-keys/"+credID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	// Verify credential is now revoked in the store.
+	got, err := s.GetCredential(credID)
+	if err != nil {
+		t.Fatalf("GetCredential: %v", err)
+	}
+	if got.RevokedAt == nil {
+		t.Error("expected RevokedAt to be set after revocation")
+	}
+}
+
+func TestAdminMachineKeyRevoke_NotFound(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/machine-keys/does-not-exist", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestAdminMachineKeyRevoke_AlreadyRevoked(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	provisionMachineKey(t, s, "lucos-already-revoked-agent")
+	p, _ := s.GetPrincipalByExternalID(store.PrincipalClassAgent, "lucos-already-revoked-agent")
+	creds, _ := s.ListCredentialsByPrincipal(p.ID)
+	credID := creds[0].ID
+
+	// Revoke once.
+	if err := s.RevokeCredential(credID, "test-admin"); err != nil {
+		t.Fatalf("first RevokeCredential: %v", err)
+	}
+
+	// Second revoke via API should return 409.
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/machine-keys/"+credID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rr.Code)
+	}
+}
+
+func TestAdminMachineKeyRevoke_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/machine-keys/some-id", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestAdminMachineKeyRevoke_RequiresAdmin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	req := httptest.NewRequest(http.MethodDelete, "/admin/machine-keys/some-id", nil)
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+// --- /admin/agents list endpoint tests ---
+
+func TestAdminAgentsList_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	vocab, _ := parseScopesYAML([]byte("scopes:\n  - render-ui\n  - aithne:admin\n"))
+
+	// Create two agent principals.
+	if _, err := s.CreatePrincipal(store.PrincipalClassAgent, "lucos-agent-alpha"); err != nil {
+		t.Fatalf("create principal: %v", err)
+	}
+	if _, err := s.CreatePrincipal(store.PrincipalClassAgent, "lucos-agent-beta"); err != nil {
+		t.Fatalf("create principal: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newAgentsMux(s, vocab).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected application/json, got %q", ct)
+	}
+	var agents []agentJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &agents); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+	slugs := []string{agents[0].Slug, agents[1].Slug}
+	if !strings.Contains(slugs[0]+"_"+slugs[1], "alpha") || !strings.Contains(slugs[0]+"_"+slugs[1], "beta") {
+		t.Errorf("unexpected slugs: %v", slugs)
+	}
+	for _, a := range agents {
+		if a.PrincipalID == "" {
+			t.Errorf("agent %q has empty principal_id", a.Slug)
+		}
+	}
+}
+
+func TestAdminAgentsList_RequiresAdmin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	vocab, _ := parseScopesYAML([]byte("scopes:\n  - render-ui\n  - aithne:admin\n"))
+
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newAgentsMux(s, vocab).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
 	}
 }
 

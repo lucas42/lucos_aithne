@@ -298,6 +298,32 @@ func runBootstrapInvite() {
 
 // --- Admin HTTP handlers ---
 
+// credentialJSON is the JSON representation of a credential returned by admin endpoints.
+type credentialJSON struct {
+	ID        string  `json:"id"`
+	Label     string  `json:"label"`
+	CreatedAt string  `json:"created_at"`
+	RevokedBy *string `json:"revoked_by,omitempty"`
+	RevokedAt *string `json:"revoked_at,omitempty"`
+}
+
+func credentialToJSON(c *store.Credential) credentialJSON {
+	j := credentialJSON{
+		ID:        c.ID,
+		Label:     c.Label,
+		CreatedAt: c.CreatedAt.Format(time.RFC3339),
+	}
+	if c.RevokedBy != nil {
+		s := *c.RevokedBy
+		j.RevokedBy = &s
+	}
+	if c.RevokedAt != nil {
+		s := c.RevokedAt.Format(time.RFC3339)
+		j.RevokedAt = &s
+	}
+	return j
+}
+
 // grantJSON is the JSON representation of a grant returned by admin endpoints.
 type grantJSON struct {
 	ID          string  `json:"id"`
@@ -746,6 +772,131 @@ type adminGrantsPageData struct {
 	LookupError          string     // e.g. "contact not found"
 }
 
+// adminAgentsPageData holds the per-request data for templates/admin_agents.html.
+type adminAgentsPageData struct {
+	Nonce              string
+	SessionToken       string          // raw JWT — embedded for AJAX calls
+	Scopes             []string        // sorted vocabulary for the grant scope <select>
+	DefaultEnvironment string          // pre-fills the environment field
+	Slug               string          // agent slug searched for (URL ?slug=X)
+	PrincipalID        string          // resolved UUID; empty when not yet searched or not found
+	Credentials        []credentialJSON // machine keys for this agent (all, including revoked)
+	Grants             []grantJSON     // grants for this agent
+	LookupError        string          // e.g. "agent not found"
+}
+
+// adminAgentsPage serves the browser-facing agent management UI (GET /admin/agents
+// without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
+// ?slug=X resolves the agent principal server-side and populates the page.
+func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_agents.html"))
+	scopes := vocab.All()
+	return func(w http.ResponseWriter, r *http.Request) {
+		nonce, err := applyPageCSP(w)
+		if err != nil {
+			log.Printf("adminAgentsPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
+		data := adminAgentsPageData{
+			Nonce:              nonce,
+			SessionToken:       sessionToken,
+			Scopes:             scopes,
+			DefaultEnvironment: defaultEnv,
+		}
+		slug := r.URL.Query().Get("slug")
+		if slug != "" {
+			data.Slug = slug
+			p, perr := s.GetPrincipalByExternalID(store.PrincipalClassAgent, slug)
+			if errors.Is(perr, store.ErrNotFound) {
+				data.LookupError = fmt.Sprintf("No agent principal found for slug %q.", slug)
+			} else if perr != nil {
+				log.Printf("adminAgentsPage: lookup agent %q: %v", slug, perr)
+				data.LookupError = "Could not look up agent. Try again."
+			} else {
+				data.PrincipalID = p.ID
+				creds, cerr := s.ListCredentialsByPrincipal(p.ID)
+				if cerr != nil {
+					log.Printf("adminAgentsPage: list credentials for %q: %v", slug, cerr)
+					data.LookupError = "Could not load credentials. Try again."
+				} else {
+					data.Credentials = make([]credentialJSON, 0, len(creds))
+					for _, c := range creds {
+						if c.Type == store.CredentialTypeMachineKey {
+							data.Credentials = append(data.Credentials, credentialToJSON(c))
+						}
+					}
+				}
+				grants, gerr := s.ListGrants(p.ID, "", false)
+				if gerr != nil {
+					log.Printf("adminAgentsPage: list grants for %q: %v", slug, gerr)
+					data.LookupError = "Could not load grants. Try again."
+				} else {
+					data.Grants = make([]grantJSON, 0, len(grants))
+					for _, g := range grants {
+						data.Grants = append(data.Grants, grantToJSON(g))
+					}
+				}
+			}
+		}
+		if err := tmpl.Execute(w, data); err != nil {
+			log.Printf("adminAgentsPage: render: %v", err)
+		}
+	}
+}
+
+// agentJSON is the JSON shape returned by the agent list endpoint.
+type agentJSON struct {
+	Slug        string `json:"slug"`
+	PrincipalID string `json:"principal_id"`
+}
+
+// listAgents handles GET /admin/agents (with Authorization: Bearer).
+// Returns a JSON list of all agent principals for the admin datalist picker.
+func listAgents(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		principals, err := s.ListPrincipals(store.PrincipalClassAgent)
+		if err != nil {
+			log.Printf("listAgents: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		result := make([]agentJSON, 0, len(principals))
+		for _, p := range principals {
+			result = append(result, agentJSON{Slug: p.ExternalID, PrincipalID: p.ID})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// handleAgents serves /admin/agents.
+//
+// GET without an Authorization: Bearer header → HTML agent management page
+// (browser session via requireAdminScopeFromCookie).
+// GET with Authorization: Bearer → JSON list of agent principals (API).
+func handleAgents(s *store.Store, vocab *store.Vocabulary, issuer, environment string) http.HandlerFunc {
+	htmlPage := requireAdminScopeFromCookie(s, issuer, adminAgentsPage(s, vocab, environment))
+	jsonList := requireAdminScope(s, issuer, listAgents(s))
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+				jsonList(w, r)
+			} else {
+				htmlPage(w, r)
+			}
+		default:
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
 // handleHomePage serves GET / — the homepage.
 // It performs a soft session check: reads the aithne_session cookie and validates
 // the JWT, but does not redirect on failure (unlike requireAdminScopeFromCookie).
@@ -1028,7 +1179,9 @@ func main() {
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, issuer, handleAdminContacts(contacts)))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
 	mux.HandleFunc("/admin/invites/", requireAdminScope(s, issuer, handleAdminInviteByHash(s)))
+	mux.HandleFunc("/admin/agents", handleAgents(s, vocab, issuer, environment))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, issuer, handleAdminMachineKeys(s)))
+	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, issuer, handleAdminMachineKeyByID(s)))
 	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, issuer, handleRotateSigningKey(s)))
