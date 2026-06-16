@@ -4007,7 +4007,7 @@ func TestHandleAdminContacts_Success(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[{"id":"1","name":"Alice Example"},{"id":"2","name":"Bob Test"}]`)
+		fmt.Fprint(w, `[{"id":1,"name":"Alice Example"},{"id":2,"name":"Bob Test"}]`)
 	}))
 	defer contactsSrv.Close()
 	contacts := newContactsClient(contactsSrv.URL, "test-key")
@@ -4034,10 +4034,10 @@ func TestHandleAdminContacts_Success(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 contacts, got %d", len(items))
 	}
-	if items[0].ID != "1" || items[0].Name != "Alice Example" {
+	if items[0].ID != 1 || items[0].Name != "Alice Example" {
 		t.Errorf("unexpected first contact: %+v", items[0])
 	}
-	if items[1].ID != "2" || items[1].Name != "Bob Test" {
+	if items[1].ID != 2 || items[1].Name != "Bob Test" {
 		t.Errorf("unexpected second contact: %+v", items[1])
 	}
 }

@@ -111,10 +111,16 @@ func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
 }
 
 // contactListItem is a single entry in the contact list returned by List.
+// ID matches the numeric id field returned by lucos_contacts /people/all.
 type contactListItem struct {
-	ID   string `json:"id"`
+	ID   int    `json:"id"`
 	Name string `json:"name"`
 }
+
+// errContactsDecodeFailure is wrapped by List when the upstream returned a
+// 200 but the body could not be decoded.  handleAdminContacts uses errors.Is
+// to emit a more accurate operator message than "could not reach service".
+var errContactsDecodeFailure = errors.New("contacts: bad upstream response")
 
 // List fetches all contacts from lucos_contacts as a flat [{id, name}] list.
 // Intended for the admin contact-search widget — the result is returned to the
@@ -142,7 +148,7 @@ func (c *contactsClient) List() ([]contactListItem, error) {
 
 	var items []contactListItem
 	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		return nil, fmt.Errorf("contacts: list: decode: %w", err)
+		return nil, fmt.Errorf("%w: %v", errContactsDecodeFailure, err)
 	}
 	return items, nil
 }
@@ -160,7 +166,11 @@ func handleAdminContacts(contacts *contactsClient) http.HandlerFunc {
 		items, err := contacts.List()
 		if err != nil {
 			log.Printf("handleAdminContacts: %v", err)
-			http.Error(w, "502 Bad Gateway — could not reach contacts service", http.StatusBadGateway)
+			if errors.Is(err, errContactsDecodeFailure) {
+				http.Error(w, "502 Bad Gateway — contacts service returned unparseable response", http.StatusBadGateway)
+			} else {
+				http.Error(w, "502 Bad Gateway — could not reach contacts service", http.StatusBadGateway)
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
