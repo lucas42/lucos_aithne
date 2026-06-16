@@ -1,5 +1,5 @@
 # Navbar stage: compiled navbar web-component bundle.
-FROM lucas42/lucos_navbar:2.1.73 AS navbar
+FROM lucas42/lucos_navbar:2.1.74 AS navbar
 
 # Vocabulary stage: canonical scope vocabulary from lucos_auth_scopes.
 # Named stage so Dependabot can track the tag + digest (COPY --from=<digest>

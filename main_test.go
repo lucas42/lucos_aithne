@@ -817,6 +817,25 @@ func TestLoginPage_SetsCSP(t *testing.T) {
 	}
 }
 
+func TestCSP_StyleSrcHasNoUnsafeInline(t *testing.T) {
+	// Regression guard for #137: 'unsafe-inline' must not appear in style-src.
+	// lucos_navbar v2.1.74+ uses constructable stylesheets (adoptedStyleSheets)
+	// instead of document.createElement('style'), so 'unsafe-inline' is no longer
+	// needed and must never be re-added silently.
+	rr := httptest.NewRecorder()
+	_, err := applyPageCSP(rr)
+	if err != nil {
+		t.Fatalf("applyPageCSP: %v", err)
+	}
+	csp := rr.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "'unsafe-inline'") {
+		t.Errorf("style-src must not contain 'unsafe-inline'; got CSP: %q", csp)
+	}
+	if !strings.Contains(csp, "style-src 'self'") {
+		t.Errorf("style-src must contain 'self'; got CSP: %q", csp)
+	}
+}
+
 func TestSecureHeaders_Present(t *testing.T) {
 	// secureHeaders must add X-Frame-Options, X-Content-Type-Options, and
 	// Referrer-Policy to every response, regardless of the underlying handler.
