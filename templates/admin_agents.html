@@ -355,7 +355,7 @@
       if (!cells.length || !sessionToken) return;
       try {
         var resp = await fetch('/admin/contacts', {
-          headers: { 'Authorization': 'Bearer ' + sessionToken },
+          headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
         });
         if (!resp.ok) return;
         var contacts = await resp.json();
