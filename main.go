@@ -982,8 +982,8 @@ func handleLogout(appOrigin, environment string) http.HandlerFunc {
 }
 
 // handleLoginPage serves the login page as a Go template, injecting a fresh
-// per-request nonce into the <script> and <style> tags so the Content-Security-
-// Policy can be locked to 'nonce-{nonce}' without requiring hashes or 'unsafe-inline'.
+// per-request nonce into the <script> tags so the Content-Security-Policy can be
+// locked to 'nonce-{nonce}' without requiring hashes or 'unsafe-inline'.
 func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFS(tmplFS, "templates/login.html"))
 	return func(w http.ResponseWriter, r *http.Request) {
