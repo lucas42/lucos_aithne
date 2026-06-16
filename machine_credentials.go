@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,6 +168,9 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 		if c.Type != store.CredentialTypeMachineKey {
 			continue
 		}
+		if c.RevokedAt != nil {
+			continue // skip revoked keys — revocation is enforced here
+		}
 		if string(c.Data) == secretHash {
 			matched = true
 			break
@@ -295,5 +299,46 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 			CreatedAt:    cred.CreatedAt,
 			Note:         "Store client_secret in lucos_creds immediately — it is shown only once and not stored by aithne.",
 		})
+	}
+}
+
+// handleAdminMachineKeyByID dispatches DELETE for /admin/machine-keys/{id}.
+// Revokes the identified machine_key credential (soft-revoke, keeping the row
+// for audit). Mirrors handleGrantByID. Must be wrapped in requireAdminScope.
+func handleAdminMachineKeyByID(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Extract the credential ID from the path: /admin/machine-keys/{id}
+		id := strings.TrimPrefix(r.URL.Path, "/admin/machine-keys/")
+		if id == "" {
+			http.Error(w, "400 Bad Request — credential ID required", http.StatusBadRequest)
+			return
+		}
+
+		// Attribution is read from the verified JWT claims injected by
+		// requireAdminScope — never from a client-supplied header.
+		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		revokedBy := claims.Subject
+
+		err := s.RevokeCredential(id, revokedBy)
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, store.ErrCredentialRevoked) {
+			http.Error(w, "409 Conflict — credential is already revoked", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			log.Printf("revokeCredential: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

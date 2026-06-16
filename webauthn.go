@@ -210,6 +210,9 @@ func loadWebAuthnUserByPrincipal(s *store.Store, p *store.Principal) (*webAuthnU
 		if c.Type != store.CredentialTypeWebAuthn {
 			continue
 		}
+		if c.RevokedAt != nil {
+			continue // defensive: skip revoked credentials (WebAuthn revocation not yet in UI, but guard now)
+		}
 		wc, err := store.UnmarshalWebAuthnCredential(c.Data)
 		if err != nil {
 			log.Printf("loadWebAuthnUser: skip credential %s: %v", c.ID, err)
@@ -469,6 +472,9 @@ func findAndUpdateSignCount(s *store.Store, user *webAuthnUser, updated *gwebaut
 	for _, c := range creds {
 		if c.Type != store.CredentialTypeWebAuthn {
 			continue
+		}
+		if c.RevokedAt != nil {
+			continue // defensive: skip revoked credentials
 		}
 		wc, err := store.UnmarshalWebAuthnCredential(c.Data)
 		if err != nil {

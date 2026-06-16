@@ -70,7 +70,12 @@ type Credential struct {
 	Data        []byte
 	Label       string
 	CreatedAt   time.Time
+	RevokedBy   *string    // non-nil if revoked (mirrors Grant.RevokedBy)
+	RevokedAt   *time.Time // non-nil if revoked (mirrors Grant.RevokedAt)
 }
+
+// IsActive reports whether the credential has not been revoked.
+func (c *Credential) IsActive() bool { return c.RevokedAt == nil }
 
 // Sentinel errors returned by Store methods.
 var (
@@ -85,6 +90,9 @@ var (
 
 	// ErrInviteUsed is returned when the invite token has already been consumed.
 	ErrInviteUsed = errors.New("store: enrolment invite has already been used")
+
+	// ErrCredentialRevoked is returned when attempting to revoke an already-revoked credential.
+	ErrCredentialRevoked = errors.New("store: credential is already revoked")
 )
 
 // Store manages aithne's principal registry and credential store via SQLite.
@@ -226,7 +234,30 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("exec %q: %w", summary, err)
 		}
 	}
+
+	// Additive migrations: ALTER TABLE ADD COLUMN (nullable, so no default needed).
+	// addColumnIfNotExists is idempotent — re-running on an already-migrated DB is safe.
+	for _, col := range []struct{ decl string }{
+		{"revoked_by TEXT"},
+		{"revoked_at DATETIME"},
+	} {
+		if err := s.addColumnIfNotExists("credentials", col.decl); err != nil {
+			return fmt.Errorf("migrate credentials: add %s: %w", col.decl, err)
+		}
+	}
+
 	return nil
+}
+
+// addColumnIfNotExists applies "ALTER TABLE tbl ADD COLUMN decl" and silently
+// ignores the "duplicate column name" error that SQLite returns when the column
+// already exists — the only way to make ADD COLUMN idempotent in SQLite.
+func (s *Store) addColumnIfNotExists(table, decl string) error {
+	_, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, decl))
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
 }
 
 // --- Principal registry ---
@@ -351,7 +382,7 @@ func (s *Store) CreateCredential(principalID string, credType CredentialType, da
 // Returns ErrNotFound if no such credential exists.
 func (s *Store) GetCredential(id string) (*Credential, error) {
 	row := s.db.QueryRow(
-		`SELECT id, principal_id, type, data, label, created_at FROM credentials WHERE id = ?`, id,
+		`SELECT id, principal_id, type, data, label, created_at, revoked_by, revoked_at FROM credentials WHERE id = ?`, id,
 	)
 	return scanCredential(row)
 }
@@ -360,7 +391,7 @@ func (s *Store) GetCredential(id string) (*Credential, error) {
 // ordered by creation time.
 func (s *Store) ListCredentialsByPrincipal(principalID string) ([]*Credential, error) {
 	rows, err := s.db.Query(
-		`SELECT id, principal_id, type, data, label, created_at FROM credentials WHERE principal_id = ? ORDER BY created_at`,
+		`SELECT id, principal_id, type, data, label, created_at, revoked_by, revoked_at FROM credentials WHERE principal_id = ? ORDER BY created_at`,
 		principalID,
 	)
 	if err != nil {
@@ -368,6 +399,34 @@ func (s *Store) ListCredentialsByPrincipal(principalID string) ([]*Credential, e
 	}
 	defer rows.Close()
 	return collectCredentials(rows)
+}
+
+// RevokeCredential marks a credential as revoked.
+// Returns ErrNotFound if no such credential exists.
+// Returns ErrCredentialRevoked if the credential is already revoked.
+func (s *Store) RevokeCredential(id, revokedByExternalID string) error {
+	// Fetch current state first to distinguish not-found from already-revoked.
+	row := s.db.QueryRow(`SELECT revoked_at FROM credentials WHERE id = ?`, id)
+	var revokedAt sql.NullString
+	if err := row.Scan(&revokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("store: revoke credential fetch: %w", err)
+	}
+	if revokedAt.Valid {
+		return ErrCredentialRevoked
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`UPDATE credentials SET revoked_by = ?, revoked_at = ? WHERE id = ?`,
+		revokedByExternalID, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: revoke credential: %w", err)
+	}
+	return nil
 }
 
 // UpdateCredentialData replaces the data BLOB for an existing credential.
@@ -448,7 +507,9 @@ func collectPrincipals(rows *sql.Rows) ([]*Principal, error) {
 func scanCredential(row *sql.Row) (*Credential, error) {
 	c := &Credential{}
 	var createdAt string
-	if err := row.Scan(&c.ID, &c.PrincipalID, (*string)(&c.Type), &c.Data, &c.Label, &createdAt); err != nil {
+	var revokedBy sql.NullString
+	var revokedAt sql.NullString
+	if err := row.Scan(&c.ID, &c.PrincipalID, (*string)(&c.Type), &c.Data, &c.Label, &createdAt, &revokedBy, &revokedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -459,6 +520,17 @@ func scanCredential(row *sql.Row) (*Credential, error) {
 		return nil, fmt.Errorf("store: parse credential timestamp: %w", err)
 	}
 	c.CreatedAt = t
+	if revokedBy.Valid {
+		s := revokedBy.String
+		c.RevokedBy = &s
+	}
+	if revokedAt.Valid {
+		rt, err := parseTime(revokedAt.String)
+		if err != nil {
+			return nil, fmt.Errorf("store: parse credential revoked_at: %w", err)
+		}
+		c.RevokedAt = &rt
+	}
 	return c, nil
 }
 
@@ -467,7 +539,9 @@ func collectCredentials(rows *sql.Rows) ([]*Credential, error) {
 	for rows.Next() {
 		c := &Credential{}
 		var createdAt string
-		if err := rows.Scan(&c.ID, &c.PrincipalID, (*string)(&c.Type), &c.Data, &c.Label, &createdAt); err != nil {
+		var revokedBy sql.NullString
+		var revokedAt sql.NullString
+		if err := rows.Scan(&c.ID, &c.PrincipalID, (*string)(&c.Type), &c.Data, &c.Label, &createdAt, &revokedBy, &revokedAt); err != nil {
 			return nil, fmt.Errorf("store: scan credential row: %w", err)
 		}
 		t, err := parseTime(createdAt)
@@ -475,6 +549,17 @@ func collectCredentials(rows *sql.Rows) ([]*Credential, error) {
 			return nil, fmt.Errorf("store: parse credential timestamp: %w", err)
 		}
 		c.CreatedAt = t
+		if revokedBy.Valid {
+			s := revokedBy.String
+			c.RevokedBy = &s
+		}
+		if revokedAt.Valid {
+			rt, err := parseTime(revokedAt.String)
+			if err != nil {
+				return nil, fmt.Errorf("store: parse credential revoked_at: %w", err)
+			}
+			c.RevokedAt = &rt
+		}
 		result = append(result, c)
 	}
 	if err := rows.Err(); err != nil {
