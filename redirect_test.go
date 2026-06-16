@@ -38,6 +38,19 @@ func TestIsAllowedRedirect(t *testing.T) {
 
 		// Unsafe: double-slash path (browser-parsed as protocol-relative)
 		{name: "double-slash path", input: "//evil.com", want: false},
+
+		// Edge cases explicitly considered — not open-redirect attacks but
+		// documented here to show the behaviour was thought through:
+		//
+		// Embedded credential: url.Parse puts "evil.com" in the User field and
+		// "l42.eu" in Host, so Hostname() returns "l42.eu". Destination is
+		// in-estate. Modern browsers also block or warn on credential-in-URL
+		// navigation, so this is not exploitable.
+		{name: "embedded credential in-estate host", input: "https://evil.com@l42.eu/", want: true},
+		// Relative path without leading slash: parsed as a bare path with no host.
+		// The browser resolves it relative to aithne.l42.eu so the user stays
+		// in-estate. Malformed but not an open redirect.
+		{name: "relative path no leading slash", input: "evil.com/path", want: true},
 	}
 
 	for _, tc := range cases {
