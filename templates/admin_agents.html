@@ -343,6 +343,33 @@
       }
     })();
 
+    // ── Resolve "Granted by" contact IDs to display names ───────────────────
+    //
+    // The grants table renders raw contact UUIDs server-side; we resolve them
+    // to display names after page load using the same /admin/contacts endpoint
+    // the grants page uses for its datalist.  Non-fatal: if the contacts
+    // service is unavailable, or the granter is a machine agent not in
+    // lucos_contacts, the raw UUID remains visible — no error is shown.
+    (async function resolveGrantedByNames() {
+      var cells = document.querySelectorAll('#grantsBody tr td:nth-child(3)');
+      if (!cells.length || !sessionToken) return;
+      try {
+        var resp = await fetch('/admin/contacts', {
+          headers: { 'Accept': 'application/json', 'Authorization': 'Bearer ' + sessionToken },
+        });
+        if (!resp.ok) return;
+        var contacts = await resp.json();
+        var nameById = {};
+        contacts.forEach(function(c) { nameById[c.id] = c.name; });
+        cells.forEach(function(cell) {
+          var id = cell.textContent.trim();
+          if (nameById[id]) { cell.textContent = nameById[id]; }
+        });
+      } catch (_) {
+        // Non-fatal — IDs remain if contacts service is unavailable.
+      }
+    })();
+
     // ── Provision machine key ──────────────────────────────────────────────
     var provisionForm      = document.getElementById('provisionForm');
     var provisionBtn       = document.getElementById('provisionBtn');
