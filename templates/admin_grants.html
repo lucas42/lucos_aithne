@@ -6,59 +6,10 @@
   <title>Manage contacts — lucOS Admin</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/aithne.css">
-  <style nonce="{{.Nonce}}">
-    .card { max-width: 640px; }
-    .sr-only {
-      position: absolute; width: 1px; height: 1px;
-      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
-    }
-    .search-form { display: flex; gap: .5rem; align-items: flex-end; margin-bottom: 1.5rem; }
-    .search-form > div { flex: 1; }
-    .search-form input[type="text"] { margin-bottom: 0; }
-    .search-form button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
-    h2 { font-size: 1rem; font-weight: 600; margin-bottom: .875rem; }
-    table {
-      width: 100%; border-collapse: collapse;
-      font-size: .875rem; margin-bottom: 1.5rem;
-    }
-    th {
-      text-align: left; padding: .5rem .625rem;
-      border-bottom: 2px solid #e0e0e0;
-      font-weight: 600; color: #555;
-    }
-    td { padding: .5rem .625rem; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
-    td:last-child { width: 1%; white-space: nowrap; }
-    .revoke-btn {
-      display: inline-block; width: auto;
-      padding: .25rem .625rem; font-size: .8rem; font-weight: 500;
-      background: #fff0f0; border: 1px solid #f5c6cb; color: #c00;
-      border-radius: 4px; cursor: pointer; transition: background .15s;
-    }
-    .revoke-btn:hover { background: #fcc; }
-    .revoke-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
-    .empty { color: #888; font-size: .875rem; margin-bottom: 1.5rem; }
-    .section-sep {
-      border: none; border-top: 1px solid #e0e0e0;
-      margin: 0 0 1.25rem;
-    }
-    .grant-form-heading { font-size: .875rem; font-weight: 600; margin-bottom: .75rem; }
-    .field-group { margin-bottom: .875rem; }
-    .field-row { display: flex; gap: .5rem; align-items: flex-end; }
-    .field-row > div { flex: 1; }
-    .field-row input[type="text"] { margin-bottom: 0; }
-    .field-row button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
-    select {
-      display: block; width: 100%; padding: .5rem .75rem;
-      font-size: 1rem; border: 1px solid #ccc;
-      border-radius: 6px; outline: none;
-      transition: border-color .15s;
-    }
-    select:focus { border-color: #c49000; }
-  </style>
 </head>
 <body>
   <lucos-navbar>Manage contacts</lucos-navbar>
-  <div class="card">
+  <div class="card card--lg">
     <nav class="admin-nav" aria-label="Admin sections">
       <a href="/">Home</a>
       <a href="/admin/agents">Manage agents</a>
