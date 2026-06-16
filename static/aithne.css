@@ -1,6 +1,11 @@
 /* Shared styles for all aithne pages */
 
+/* ── Reset ──────────────────────────────────────────────────────── */
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none; }
+
+/* ── Root / page background ──────────────────────────────────────── */
 
 html {
   background-color: #f5c300;
@@ -21,15 +26,14 @@ body {
   color: #1a1a1a;
 }
 
-.card {
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(0,0,0,.1);
-  padding: 2rem;
-  width: 100%;
-  max-width: 360px;
-}
+/* ── Base element styles ─────────────────────────────────────────── */
 
+h2 { font-size: 1rem; font-weight: 600; margin-bottom: .875rem; }
+
+p { color: #555; font-size: .9rem; line-height: 1.5; margin-bottom: 1.25rem; }
+
+a { color: #785b00; text-decoration: none; font-size: .875rem; }
+a:hover { text-decoration: underline; }
 
 button {
   display: block;
@@ -47,26 +51,8 @@ button {
 button:hover { background: #d4a500; }
 button[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events: none; }
 
-.error {
-  background: #fff0f0;
-  border: 1px solid #f5c6cb;
-  border-radius: 6px;
-  padding: .625rem .75rem;
-  font-size: .875rem;
-  color: #c00;
-  margin-top: .75rem;
-}
-.error[hidden] { display: none; }
-
-/* Shown when a contacts service lookup fails and the raw ID is used as fallback. */
-.name-unavailable {
-  font-size: .8em;
-  font-weight: normal;
-  font-style: italic;
-  color: #888;
-}
-
 label { display: block; font-size: .875rem; font-weight: 500; margin-bottom: .375rem; }
+
 input[type="text"] {
   display: block;
   width: 100%;
@@ -80,7 +66,53 @@ input[type="text"] {
 }
 input[type="text"]:focus { border-color: #c49000; }
 
-/* Admin section tab nav — shared across all admin pages */
+select {
+  display: block; width: 100%; padding: .5rem .75rem;
+  font-size: 1rem; border: 1px solid #ccc;
+  border-radius: 6px; outline: none;
+  transition: border-color .15s;
+}
+select:focus { border-color: #c49000; }
+
+/* ── Card ────────────────────────────────────────────────────────── */
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.1);
+  padding: 2rem;
+  width: 100%;
+  max-width: 360px;
+}
+
+/* Size modifiers */
+.card--md { max-width: 560px; }
+.card--lg { max-width: 640px; }
+.card--xl { max-width: 680px; }
+.card--center { text-align: center; }
+
+/* ── Feedback / status messages ──────────────────────────────────── */
+
+.error {
+  background: #fff0f0;
+  border: 1px solid #f5c6cb;
+  border-radius: 6px;
+  padding: .625rem .75rem;
+  font-size: .875rem;
+  color: #c00;
+  margin-top: .75rem;
+}
+
+/* Shown when a contacts service lookup fails and the raw ID is used as fallback. */
+.name-unavailable {
+  font-size: .8em;
+  font-weight: normal;
+  font-style: italic;
+  color: #888;
+}
+
+/* ── Admin section tab nav ───────────────────────────────────────── */
+
 .admin-nav {
   display: flex; gap: 0;
   font-size: .8rem;
@@ -88,14 +120,215 @@ input[type="text"]:focus { border-color: #c49000; }
   border-bottom: 2px solid #e0e0e0;
 }
 .admin-nav a {
-  color: #777; text-decoration: none;
+  color: #777; text-decoration: none; font-size: .8rem;
   padding: .5rem .875rem;
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   transition: color .15s, border-color .15s;
 }
-.admin-nav a:hover { color: #1a1a1a; }
+.admin-nav a:hover { color: #1a1a1a; text-decoration: none; }
 .admin-nav a[aria-current="page"] {
   color: #1a1a1a; font-weight: 600;
   border-bottom-color: #1a1a1a;
 }
+
+/* ── Utility ─────────────────────────────────────────────────────── */
+
+/* Visually hidden but accessible to screen readers */
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+}
+
+/* Back-navigation link paragraph (login page) */
+.back-link { margin-top: 1rem; font-size: .8rem; text-align: center; margin-bottom: 0; }
+
+/* Primary CTA action links / buttons (home page) */
+a.action, button.action {
+  display: inline-block;
+  padding: .625rem 1.25rem;
+  background: #f5c300;
+  color: #1a1a1a;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: .9rem;
+  border: none;
+  cursor: pointer;
+}
+a.action:hover, button.action:hover { background: #d4a500; text-decoration: none; }
+
+/* ── Search / lookup form ────────────────────────────────────────── */
+
+.search-form { display: flex; gap: .5rem; align-items: flex-end; margin-bottom: 1.5rem; }
+.search-form > div { flex: 1; }
+.search-form input[type="text"] { margin-bottom: 0; }
+.search-form button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
+
+/* ── Data tables ─────────────────────────────────────────────────── */
+
+table {
+  width: 100%; border-collapse: collapse;
+  font-size: .875rem; margin-bottom: 1.5rem;
+}
+th {
+  text-align: left; padding: .5rem .625rem;
+  border-bottom: 2px solid #e0e0e0;
+  font-weight: 600; color: #555;
+}
+td { padding: .5rem .625rem; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+td:last-child { width: 1%; white-space: nowrap; }
+
+/* ── Action buttons ──────────────────────────────────────────────── */
+
+/* Revoke row action — subtle (red text, white background) */
+.revoke-btn {
+  display: inline-block; width: auto;
+  padding: .25rem .625rem; font-size: .8rem; font-weight: 500;
+  background: #fff0f0; border: 1px solid #f5c6cb; color: #c00;
+  border-radius: 4px; cursor: pointer; transition: background .15s;
+}
+.revoke-btn:hover { background: #fcc; }
+.revoke-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
+
+/* Revoke invite — standalone destructive action (solid red) */
+.revoke-invite-btn {
+  display: inline-block; width: auto;
+  padding: .375rem .75rem; font-size: .8rem;
+  background: #c0392b; border: none; color: #fff;
+  border-radius: 4px; cursor: pointer; transition: background .15s;
+  margin-top: .5rem; margin-left: .5rem;
+}
+.revoke-invite-btn:hover { background: #922b21; }
+.revoke-invite-btn[aria-disabled="true"] { background: #aaa; cursor: default; pointer-events: none; }
+
+/* Copy button */
+.copy-btn {
+  display: inline-block; width: auto; flex-shrink: 0;
+  padding: .375rem .75rem; font-size: .8rem;
+  background: #f5c300; color: #1a1a1a;
+  border: none; border-radius: 4px; cursor: pointer;
+}
+.copy-btn:hover { background: #d4a500; }
+
+/* ── Inline confirm prompt ───────────────────────────────────────── */
+
+.confirm-row { display: flex; flex-wrap: wrap; gap: .375rem; align-items: center; }
+.confirm-row p { font-size: .75rem; color: #c00; margin: 0; flex-basis: 100%; }
+.confirm-btn {
+  display: inline-block; width: auto;
+  padding: .25rem .625rem; font-size: .8rem; font-weight: 600;
+  background: #c00; border: none; color: #fff;
+  border-radius: 4px; cursor: pointer; transition: background .15s;
+}
+.confirm-btn:hover { background: #900; }
+.confirm-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
+.cancel-btn {
+  display: inline-block; width: auto;
+  padding: .25rem .625rem; font-size: .8rem; font-weight: 500;
+  background: #f0f0f0; border: 1px solid #ccc; color: #555;
+  border-radius: 4px; cursor: pointer; transition: background .15s;
+}
+.cancel-btn:hover { background: #ddd; }
+.cancel-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
+
+/* ── Status badges ───────────────────────────────────────────────── */
+
+.status-active {
+  display: inline-block; padding: .125rem .5rem;
+  font-size: .75rem; font-weight: 600;
+  background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20;
+  border-radius: 999px;
+}
+.status-revoked {
+  display: inline-block; padding: .125rem .5rem;
+  font-size: .75rem; font-weight: 500;
+  background: #f5f5f5; border: 1px solid #ccc; color: #888;
+  border-radius: 999px;
+}
+
+/* ── Admin page chrome ───────────────────────────────────────────── */
+
+.empty { color: #888; font-size: .875rem; margin-bottom: 1.5rem; }
+.section-sep { border: none; border-top: 1px solid #e0e0e0; margin: 0 0 1.25rem; }
+.grant-form-heading,
+.provision-heading { font-size: .875rem; font-weight: 600; margin-bottom: .75rem; }
+
+/* ── Grant / provision forms ─────────────────────────────────────── */
+
+.field-group { margin-bottom: .875rem; }
+.field-row { display: flex; gap: .5rem; align-items: flex-end; }
+.field-row > div { flex: 1; }
+.field-row input[type="text"] { margin-bottom: 0; }
+.field-row button { width: auto; padding: .5rem 1rem; flex-shrink: 0; }
+
+#provisionBtn { width: auto; padding: .5rem 1rem; }
+
+/* ── One-time secret panel ───────────────────────────────────────── */
+
+.secret-panel {
+  margin: 1rem 0 1.5rem;
+  padding: 1rem;
+  background: #fef8e0;
+  border: 1px solid #e8d060;
+  border-radius: 6px;
+}
+.secret-warning {
+  padding: .5rem .75rem;
+  background: #fff3cd; border: 1px solid #f5c300;
+  border-radius: 4px;
+  font-size: .875rem; color: #5a3e00;
+  margin-bottom: .875rem;
+}
+.secret-warning strong { display: block; margin-bottom: .25rem; }
+.secret-panel > p { font-size: .8rem; color: #555; margin-bottom: .875rem; }
+.secret-field { margin-bottom: .75rem; }
+.secret-field label { font-size: .8rem; font-weight: 600; color: #555; margin-bottom: .25rem; }
+.secret-field input[type="text"] {
+  font-family: monospace; font-size: .8rem;
+  color: #1a1a1a; background: #fdf3c0;
+  margin-bottom: 0;
+}
+.secret-copy-row { display: flex; gap: .5rem; align-items: flex-start; }
+.secret-copy-row input[type="text"] { flex: 1; }
+
+/* ── Invite result panel (admin enrol page) ──────────────────────── */
+
+.result {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  background: #fef8e0;
+  border: 1px solid #e8d060;
+  border-radius: 6px;
+}
+.result p { font-size: .8rem; color: #555; margin-bottom: .5rem; }
+.result-url {
+  font-family: monospace;
+  font-size: .8rem;
+  word-break: break-all;
+  color: #1a1a1a;
+  background: #fdf3c0;
+  padding: .5rem;
+  border-radius: 4px;
+  margin-bottom: .5rem;
+}
+.expires { font-size: .75rem; color: #777; margin-top: .375rem; }
+.revoked-notice { margin-top: .625rem; font-size: .8rem; color: #c0392b; font-weight: 500; }
+
+/* ── Enrolment page ──────────────────────────────────────────────── */
+
+.setup-context { font-size: .875rem; color: #555; margin-bottom: 1.25rem; }
+.hint { font-size: .8rem; color: #777; margin-top: -.75rem; margin-bottom: 1rem; }
+.success { text-align: center; margin-top: .5rem; }
+.success p { color: #555; font-size: .875rem; margin-bottom: 1rem; }
+.success a {
+  display: inline-block;
+  padding: .625rem 1.5rem;
+  background: #f5c300;
+  color: #1a1a1a;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: .9rem;
+}
+.success a:hover { background: #d4a500; text-decoration: none; }

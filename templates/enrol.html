@@ -6,35 +6,6 @@
   <title>{{if .IsRecovery}}Create new passkey{{else}}Set up passkey{{end}} — lucOS</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/aithne.css">
-  <style nonce="{{.Nonce}}">
-    .setup-context {
-      font-size: .875rem;
-      color: #555;
-      margin-bottom: 1.25rem;
-    }
-    .hint {
-      font-size: .8rem;
-      color: #777;
-      margin-top: -.75rem;
-      margin-bottom: 1rem;
-    }
-    .success {
-      text-align: center;
-      margin-top: .5rem;
-    }
-    .success p { color: #555; font-size: .875rem; margin-bottom: 1rem; }
-    .success a {
-      display: inline-block;
-      padding: .625rem 1.5rem;
-      background: #f5c300;
-      color: #1a1a1a;
-      border-radius: 6px;
-      text-decoration: none;
-      font-weight: 600;
-      font-size: .9rem;
-    }
-    .success a:hover { background: #d4a500; }
-  </style>
 </head>
 <body>
   <lucos-navbar>{{if .IsRecovery}}Create new passkey{{else}}Set up passkey{{end}}</lucos-navbar>
