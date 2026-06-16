@@ -65,6 +65,8 @@ A non-human principal acquires a session **non-interactively** via the OAuth2 cl
 
 Day-one, the non-human principal on this path is the **AI agent** (agent-registry identity, §4). **Service principals (e.g. `lucos_root`) deliberately stay on `lucos_creds` linkedCredentials short-term** rather than acquiring aithne sessions — consistent with the parked M2M-convergence; a future migration would use this same grant with the service's `lucos_configy` system code as identity.
 
+> **Amendment (2026-06-16, [lucas42/lucos_arachne#636](https://github.com/lucas42/lucos_arachne/issues/636)): agent principals are per-agent.** Each AI agent is its **own** aithne principal, identified by its `personas.json` slug (e.g. `lucos-architect`) per §4 — there is **no shared fleet principal**. A single `lucos_agent` identity would collapse the per-principal scope, audit, and revocation §6 requires: a leaked shared secret would compromise the whole fleet, and grants and audit could not distinguish one agent from another. Each agent's OAuth2 `client_secret` lives in `lucos_agent/development` (`lucos_creds`) as **`LUCOS_<PERSONA>_AITHNE_CLIENT_SECRET`**, mirroring the existing per-agent `LUCOS_<PERSONA>_PEM` convention; the `client_id` is the slug itself, derived from the agent's own identity at runtime (no separate variable, and — consistent with §4 — no aithne runtime dependency on `personas.json`).
+
 ### 6. Authorisation — easy authentication, hard authorisation
 
 Authentication is made easy and uniform; **authorisation is the real gate.** Scopes decompose into three concerns that live in different places:
