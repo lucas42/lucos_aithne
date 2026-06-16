@@ -13,14 +13,23 @@
       overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
     }
     .admin-nav {
-      display: flex; gap: 1rem;
+      display: flex; gap: 0;
       font-size: .8rem;
-      margin-bottom: 1.25rem;
-      padding-bottom: .875rem;
-      border-bottom: 1px solid #f0f0f0;
+      margin-bottom: 1.5rem;
+      border-bottom: 2px solid #e0e0e0;
     }
-    .admin-nav a { color: #555; text-decoration: none; }
-    .admin-nav a:hover { text-decoration: underline; }
+    .admin-nav a {
+      color: #777; text-decoration: none;
+      padding: .5rem .875rem;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: color .15s, border-color .15s;
+    }
+    .admin-nav a:hover { color: #1a1a1a; }
+    .admin-nav a[aria-current="page"] {
+      color: #1a1a1a; font-weight: 600;
+      border-bottom-color: #1a1a1a;
+    }
     .search-form { display: flex; gap: .5rem; align-items: flex-end; margin-bottom: 1.5rem; }
     .search-form > div { flex: 1; }
     .search-form input[type="text"] { margin-bottom: 0; }
@@ -68,9 +77,10 @@
 <body>
   <lucos-navbar>Manage grants</lucos-navbar>
   <div class="card">
-    <nav class="admin-nav">
-      <a href="/">&#8592; Home</a>
+    <nav class="admin-nav" aria-label="Admin sections">
+      <a href="/">Home</a>
       <a href="/admin/agents">Manage agents</a>
+      <a href="/admin/grants" aria-current="page">Manage grants</a>
       <a href="/admin/enrol">Generate invite</a>
     </nav>
 
