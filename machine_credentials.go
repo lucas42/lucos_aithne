@@ -220,6 +220,7 @@ type createMachineKeyRequest struct {
 type createMachineKeyResponse struct {
 	ClientID     string    `json:"client_id"`
 	ClientSecret string    `json:"client_secret"`
+	PrincipalID  string    `json:"principal_id"`
 	CredentialID string    `json:"credential_id"`
 	CreatedAt    time.Time `json:"created_at"`
 	Note         string    `json:"note"`
@@ -289,6 +290,7 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(createMachineKeyResponse{
 			ClientID:     req.AgentSlug,
 			ClientSecret: rawSecret,
+			PrincipalID:  principal.ID,
 			CredentialID: cred.ID,
 			CreatedAt:    cred.CreatedAt,
 			Note:         "Store client_secret in lucos_creds immediately — it is shown only once and not stored by aithne.",

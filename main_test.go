@@ -2088,6 +2088,9 @@ func TestAdminMachineKeys_Create(t *testing.T) {
 	if resp.ClientSecret == "" {
 		t.Error("client_secret must not be empty")
 	}
+	if resp.PrincipalID == "" {
+		t.Error("principal_id must not be empty — required for subsequent POST /admin/grants calls")
+	}
 	if resp.CredentialID == "" {
 		t.Error("credential_id must not be empty")
 	}
