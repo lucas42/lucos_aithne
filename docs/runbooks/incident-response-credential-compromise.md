@@ -85,9 +85,8 @@ consumer, which is an out-of-band intervention.
 It is tempting to reach for `POST /admin/rotate-signing-key` to "invalidate everything
 immediately." **This does not help in scenario A and causes collateral damage:**
 
-1. After rotation, `ListVerificationKeys()` still returns the *old* key for **15 minutes**
-   (the verification window equals the JWT TTL), so the attacker's existing tokens remain
-   verifiable anyway.
+1. After rotation, `ListVerificationKeys()` still returns the *old* key for **30 minutes**
+   (the `VerificationWindow`), so the attacker's existing tokens remain verifiable anyway.
 2. Consumer JWKS caches add another 5 minutes on top.
 3. Meanwhile, every human session and every other agent's token is immediately
    invalidated — all agents must re-mint, all users must log in again.
@@ -130,9 +129,9 @@ curl -s -X POST https://aithne.l42.eu/admin/rotate-signing-key \
 This generates a new EC key-pair and retires the compromised key. **New forgeries are
 immediately impossible** — the old key can no longer sign tokens.
 
-However, the old key remains in the JWKS verification endpoint for **15 minutes** (the
-verification window), so any tokens already forged with the compromised key remain
-verifiable for up to ≤20 minutes. Nothing can be done about those within that window.
+However, the old key remains in the JWKS verification endpoint for **30 minutes** (the
+`VerificationWindow`), so any tokens already forged with the compromised key remain
+verifiable for up to ≤35 minutes. Nothing can be done about those within that window.
 
 ### Step 2 — Re-key the SIGNING_KEK
 
@@ -157,8 +156,8 @@ See lucas42/lucos_aithne#151 for the full procedure and the `--rekey` implementa
 
 ### Step 3 — Audit for forged tokens
 
-After the JWKS cache TTL has elapsed (~20 minutes), all old-key tokens are expired.
-Review logs for any unusual activity from the ≤20-minute window — unexpected scopes,
+After the JWKS cache TTL has elapsed (~35 minutes), all old-key tokens are expired.
+Review logs for any unusual activity from the ≤35-minute window — unexpected scopes,
 access patterns inconsistent with the identified agent slugs, etc.
 
 ---
@@ -170,11 +169,13 @@ access patterns inconsistent with the identified agent slugs, etc.
 | Revoke machine_key credential | ✅ Do this first | No effect (attacker doesn't need the secret) |
 | Revoke scope grants | ✅ Do this first | Partial mitigation only |
 | `POST /admin/rotate-signing-key` | ❌ Do NOT — no benefit, broad disruption | ✅ Do this first |
-| Effective window before full lockout | ≤20 min (JWT TTL + JWKS cache) | ≤20 min (JWT TTL + JWKS cache) |
+| Effective window before full lockout | ≤20 min (JWT TTL + JWKS cache) | ≤35 min (VerificationWindow + JWKS cache) |
 | New tokens minted after remediation | Immediately blocked | Immediately blocked |
 
-In both cases the ≤20-minute effective window is the same. The difference is in what
-stops new tokens from being minted.
+The two scenarios have different effective windows. In scenario A the window is bounded
+by the JWT TTL (15 min) plus consumer JWKS cache (5 min). In scenario B it is bounded
+by the longer `VerificationWindow` (30 min) plus consumer JWKS cache (5 min). The
+difference is in what stops new tokens from being minted.
 
 ---
 
