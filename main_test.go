@@ -2,17 +2,20 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	gwebauthn "github.com/go-webauthn/webauthn/webauthn"
+	_ "modernc.org/sqlite" // raw connection in TestInfoEndpoint_StaleSigningKey backdates created_at
 	"lucos_aithne/store"
 	"lucos_aithne/token"
 )
@@ -84,6 +87,148 @@ func TestInfoEndpoint(t *testing.T) {
 	}
 	if _, ok := payload["metrics"]; !ok {
 		t.Error("metrics field missing from /_info response")
+	}
+}
+
+// fetchInfo issues a GET /_info against the given store and returns the decoded payload.
+func fetchInfo(t *testing.T, s *store.Store) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/_info", nil)
+	rr := httptest.NewRecorder()
+	handleInfo("lucos_aithne", s)(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d", rr.Code)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&payload); err != nil {
+		t.Fatalf("failed to decode /_info response: %v", err)
+	}
+	return payload
+}
+
+func infoCheck(t *testing.T, payload map[string]any, name string) (map[string]any, bool) {
+	t.Helper()
+	checks, ok := payload["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("checks: expected map, got %T", payload["checks"])
+	}
+	raw, ok := checks[name]
+	if !ok {
+		return nil, false
+	}
+	check, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("checks.%s: expected object, got %T", name, raw)
+	}
+	return check, true
+}
+
+// With an active signing key, /_info reports signing_key + signing_key_age healthy
+// and exposes the key-count and age metrics.
+func TestInfoEndpoint_SigningKeyHealthy(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	payload := fetchInfo(t, s)
+
+	sk, ok := infoCheck(t, payload, "signing_key")
+	if !ok {
+		t.Fatal("checks.signing_key missing")
+	}
+	if sk["ok"] != true {
+		t.Errorf("signing_key.ok: got %v, want true", sk["ok"])
+	}
+	age, ok := infoCheck(t, payload, "signing_key_age")
+	if !ok {
+		t.Fatal("checks.signing_key_age missing")
+	}
+	if age["ok"] != true {
+		t.Errorf("signing_key_age.ok: got %v, want true", age["ok"])
+	}
+
+	metrics, ok := payload["metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("metrics: expected map, got %T", payload["metrics"])
+	}
+	for _, m := range []string{"signing_key_count", "active_signing_key_age_seconds"} {
+		if _, ok := metrics[m]; !ok {
+			t.Errorf("metrics.%s missing", m)
+		}
+	}
+}
+
+// With no signing key (JWKS would serve nothing), signing_key fails and the
+// age check + signing-key metrics are absent.
+func TestInfoEndpoint_NoSigningKey(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	payload := fetchInfo(t, s)
+
+	sk, ok := infoCheck(t, payload, "signing_key")
+	if !ok {
+		t.Fatal("checks.signing_key missing")
+	}
+	if sk["ok"] != false {
+		t.Errorf("signing_key.ok: got %v, want false", sk["ok"])
+	}
+	if _, ok := infoCheck(t, payload, "signing_key_age"); ok {
+		t.Error("checks.signing_key_age should be absent when there is no active key")
+	}
+	metrics, _ := payload["metrics"].(map[string]any)
+	if _, ok := metrics["signing_key_count"]; ok {
+		t.Error("metrics.signing_key_count should be absent when there is no active key")
+	}
+}
+
+// An active key older than maxSigningKeyAge keeps signing_key healthy (it can
+// still be served) but flips signing_key_age unhealthy — the startup-only-rotation
+// safety net (lucos_aithne#149). created_at is backdated via a second connection.
+func TestInfoEndpoint_StaleSigningKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "aithne.db")
+	s, err := store.Open(dbPath, testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("GetOrCreateActiveSigningKey: %v", err)
+	}
+
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw connection: %v", err)
+	}
+	old := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := conn.Exec("UPDATE signing_keys SET created_at = ? WHERE status = 'active'", old); err != nil {
+		t.Fatalf("backdate created_at: %v", err)
+	}
+	conn.Close()
+
+	payload := fetchInfo(t, s)
+
+	sk, ok := infoCheck(t, payload, "signing_key")
+	if !ok {
+		t.Fatal("checks.signing_key missing")
+	}
+	if sk["ok"] != true {
+		t.Errorf("signing_key.ok: got %v, want true (a stale key is still serveable)", sk["ok"])
+	}
+	age, ok := infoCheck(t, payload, "signing_key_age")
+	if !ok {
+		t.Fatal("checks.signing_key_age missing")
+	}
+	if age["ok"] != false {
+		t.Errorf("signing_key_age.ok: got %v, want false (key is older than maxSigningKeyAge)", age["ok"])
 	}
 }
 
