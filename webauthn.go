@@ -251,7 +251,7 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 			// match the session data without a contact_id.
 			assertion, sessionData, err := wa.BeginDiscoverableLogin()
 			if err != nil {
-				log.Printf("login/begin: BeginDiscoverableLogin: %v", err)
+				reqLogger(r).Printf("login/begin: BeginDiscoverableLogin: %v", err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
@@ -262,20 +262,20 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 			// publicKey field so the JS can echo it back on finish.
 			assertionJSON, err := json.Marshal(assertion)
 			if err != nil {
-				log.Printf("login/begin: marshal discoverable assertion: %v", err)
+				reqLogger(r).Printf("login/begin: marshal discoverable assertion: %v", err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 			var respMap map[string]json.RawMessage
 			if err := json.Unmarshal(assertionJSON, &respMap); err != nil {
-				log.Printf("login/begin: unmarshal discoverable assertion: %v", err)
+				reqLogger(r).Printf("login/begin: unmarshal discoverable assertion: %v", err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 			sessionIDJSON, _ := json.Marshal(sessionID) // uuid.New().String() is always valid JSON
 			respMap["aithne_session"] = sessionIDJSON
 			if err := json.NewEncoder(w).Encode(respMap); err != nil {
-				log.Printf("login/begin: encode discoverable options: %v", err)
+				reqLogger(r).Printf("login/begin: encode discoverable options: %v", err)
 			}
 			return
 		}
@@ -286,24 +286,24 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 		// the distinction is logged server-side.
 		user, err := loadWebAuthnUser(s, req.ContactID)
 		if errors.Is(err, store.ErrNotFound) {
-			log.Printf("login/begin: principal not found for contact %q", req.ContactID)
+			reqLogger(r).Printf("login/begin: principal not found for contact %q", req.ContactID)
 			http.Error(w, "404 Not Found — no passkey registered for this contact ID", http.StatusNotFound)
 			return
 		}
 		if err != nil {
-			log.Printf("login/begin: load user %q: %v", req.ContactID, err)
+			reqLogger(r).Printf("login/begin: load user %q: %v", req.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		if len(user.credentials) == 0 {
-			log.Printf("login/begin: principal exists but has no credentials for contact %q", req.ContactID)
+			reqLogger(r).Printf("login/begin: principal exists but has no credentials for contact %q", req.ContactID)
 			http.Error(w, "404 Not Found — no passkey registered for this contact ID", http.StatusNotFound)
 			return
 		}
 
 		assertion, sessionData, err := wa.BeginLogin(user)
 		if err != nil {
-			log.Printf("login/begin: BeginLogin %q: %v", req.ContactID, err)
+			reqLogger(r).Printf("login/begin: BeginLogin %q: %v", req.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -311,7 +311,7 @@ func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore)
 		cs.put("login:"+req.ContactID, sessionData)
 
 		if err := json.NewEncoder(w).Encode(assertion); err != nil {
-			log.Printf("login/begin: encode options: %v", err)
+			reqLogger(r).Printf("login/begin: encode options: %v", err)
 		}
 	}
 }
@@ -372,11 +372,11 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 					if errors.Is(handlerErr, store.ErrNotFound) {
 						http.Error(w, "404 Not Found — principal not found", http.StatusNotFound)
 					} else {
-						log.Printf("login/finish: discoverable user lookup: %v", handlerErr)
+						reqLogger(r).Printf("login/finish: discoverable user lookup: %v", handlerErr)
 						http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 					}
 				} else {
-					log.Printf("login/finish: FinishDiscoverableLogin: %v", err)
+					reqLogger(r).Printf("login/finish: FinishDiscoverableLogin: %v", err)
 					http.Error(w, "401 Unauthorized — authentication failed", http.StatusUnauthorized)
 				}
 				return
@@ -402,14 +402,14 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 				return
 			}
 			if err != nil {
-				log.Printf("login/finish: load user %q: %v", contactID, err)
+				reqLogger(r).Printf("login/finish: load user %q: %v", contactID, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 
 			updatedCred, err = wa.FinishLogin(user, *sessionData, r)
 			if err != nil {
-				log.Printf("login/finish: FinishLogin %q: %v", contactID, err)
+				reqLogger(r).Printf("login/finish: FinishLogin %q: %v", contactID, err)
 				http.Error(w, "401 Unauthorized — authentication failed", http.StatusUnauthorized)
 				return
 			}
@@ -419,7 +419,7 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		// The library sets CloneWarning=true when the asserted sign count is ≤
 		// the stored count and the stored count is non-zero.
 		if updatedCred.Authenticator.CloneWarning {
-			log.Printf("login/finish: sign-count clone warning for principal %s — rejecting", user.principal.ID)
+			reqLogger(r).Printf("login/finish: sign-count clone warning for principal %s — rejecting", user.principal.ID)
 			http.Error(w, "403 Forbidden — authenticator clone detected (sign count regression)", http.StatusForbidden)
 			return
 		}
@@ -431,26 +431,26 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 				// Non-fatal: log and continue. The session is still valid; the
 				// sign count update failing means the next auth is slightly less
 				// protected but not broken.
-				log.Printf("login/finish: update sign count for principal %s: %v", user.principal.ID, err)
+				reqLogger(r).Printf("login/finish: update sign count for principal %s: %v", user.principal.ID, err)
 			}
 		}
 
 		// Mint session JWT with the principal's active scopes.
 		scopes, err := s.GetActiveScopes(user.principal.ID, environment)
 		if err != nil {
-			log.Printf("login/finish: get active scopes for principal %s: %v", user.principal.ID, err)
+			reqLogger(r).Printf("login/finish: get active scopes for principal %s: %v", user.principal.ID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		signingKey, err := s.GetOrCreateActiveSigningKey()
 		if err != nil {
-			log.Printf("login/finish: get signing key: %v", err)
+			reqLogger(r).Printf("login/finish: get signing key: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		tok, err := token.MintSession(user.principal, scopes, signingKey, issuer, "l42.eu", token.DefaultSessionTTL)
 		if err != nil {
-			log.Printf("login/finish: mint session for principal %s: %v", user.principal.ID, err)
+			reqLogger(r).Printf("login/finish: mint session for principal %s: %v", user.principal.ID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}

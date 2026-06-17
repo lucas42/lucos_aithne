@@ -107,7 +107,7 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 
 		if err := s.Ping(); err != nil {
 			checks["db"] = map[string]any{"ok": false, "techDetail": dbDetail, "debug": err.Error()}
-			log.Printf("/_info db ping failed: %v", err)
+			reqLogger(r).Printf("/_info db ping failed: %v", err)
 		} else {
 			checks["db"] = map[string]any{"ok": true, "techDetail": dbDetail}
 		}
@@ -127,10 +127,10 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 		switch {
 		case keysErr != nil:
 			checks["signing_key"] = map[string]any{"ok": false, "techDetail": signingKeyDetail, "debug": keysErr.Error()}
-			log.Printf("/_info signing_key check failed: %v", keysErr)
+			reqLogger(r).Printf("/_info signing_key check failed: %v", keysErr)
 		case activeKey == nil:
 			checks["signing_key"] = map[string]any{"ok": false, "techDetail": signingKeyDetail, "debug": "no active signing key in verification set — JWKS would serve no usable key"}
-			log.Printf("/_info signing_key check failed: no active signing key")
+			reqLogger(r).Printf("/_info signing_key check failed: no active signing key")
 		default:
 			checks["signing_key"] = map[string]any{"ok": true, "techDetail": signingKeyDetail}
 			metrics["signing_key_count"] = map[string]any{"value": len(keys), "techDetail": "Signing keys currently published in JWKS (active plus recently-retired within the verification window)"}
@@ -138,7 +138,7 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 			metrics["active_signing_key_age_seconds"] = map[string]any{"value": int(age.Seconds()), "techDetail": "Age of the active signing key (last rotation = now − this); aithne rotates it at startup once older than the rotation interval"}
 			if age > maxSigningKeyAge {
 				checks["signing_key_age"] = map[string]any{"ok": false, "techDetail": signingKeyAgeDetail, "debug": fmt.Sprintf("active signing key is %s old (> %s) — rotation is overdue; restart aithne or rotate via the admin endpoint", age.Round(time.Hour), maxSigningKeyAge)}
-				log.Printf("/_info signing_key_age check failed: active key age %s exceeds %s", age.Round(time.Hour), maxSigningKeyAge)
+				reqLogger(r).Printf("/_info signing_key_age check failed: active key age %s exceeds %s", age.Round(time.Hour), maxSigningKeyAge)
 			} else {
 				checks["signing_key_age"] = map[string]any{"ok": true, "techDetail": signingKeyAgeDetail}
 			}
@@ -154,7 +154,7 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(info); err != nil {
-			log.Printf("/_info encode error: %v", err)
+			reqLogger(r).Printf("/_info encode error: %v", err)
 		}
 	}
 }
@@ -476,13 +476,13 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 		// Build verification key set from current signing keys.
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
-			log.Printf("requireAdminScope: list verification keys: %v", err)
+			reqLogger(r).Printf("requireAdminScope: list verification keys: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
-			log.Printf("requireAdminScope: build key set: %v", err)
+			reqLogger(r).Printf("requireAdminScope: build key set: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -533,13 +533,13 @@ func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.Handle
 
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
-			log.Printf("requireAdminScopeFromCookie: list verification keys: %v", err)
+			reqLogger(r).Printf("requireAdminScopeFromCookie: list verification keys: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
-			log.Printf("requireAdminScopeFromCookie: build key set: %v", err)
+			reqLogger(r).Printf("requireAdminScopeFromCookie: build key set: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -581,14 +581,14 @@ func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
 		}
 		newKey, err := s.RotateSigningKey()
 		if err != nil {
-			log.Printf("handleRotateSigningKey: %v", err)
+			reqLogger(r).Printf("handleRotateSigningKey: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		if claims, ok := r.Context().Value(claimsContextKey).(*token.SessionClaims); ok {
-			log.Printf("Signing key rotated via admin endpoint — initiated by %s, new key ID: %s", claims.Subject, newKey.ID)
+			reqLogger(r).Printf("Signing key rotated via admin endpoint — initiated by %s, new key ID: %s", claims.Subject, newKey.ID)
 		} else {
-			log.Printf("Signing key rotated via admin endpoint — new key ID: %s (actor unknown)", newKey.ID)
+			reqLogger(r).Printf("Signing key rotated via admin endpoint — new key ID: %s (actor unknown)", newKey.ID)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -611,7 +611,7 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 		// cannot arrive in practice. The guard is removed to avoid dead code.
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("adminGrantsPage: generate nonce: %v", err)
+			reqLogger(r).Printf("adminGrantsPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -630,7 +630,7 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 			if errors.Is(perr, store.ErrNotFound) {
 				data.LookupError = fmt.Sprintf("No principal found for contact ID %q.", contactID)
 			} else if perr != nil {
-				log.Printf("adminGrantsPage: lookup principal %q: %v", contactID, perr)
+				reqLogger(r).Printf("adminGrantsPage: lookup principal %q: %v", contactID, perr)
 				data.LookupError = "Could not look up principal. Try again."
 			} else {
 				data.PrincipalID = p.ID
@@ -640,13 +640,13 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 					data.ContactDisplayName = info.DisplayName
 					data.ContactNameAvailable = true
 				} else {
-					log.Printf("adminGrantsPage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, cerr)
+					reqLogger(r).Printf("adminGrantsPage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, cerr)
 					data.ContactDisplayName = contactID
 					// ContactNameAvailable stays false — template shows degradation hint
 				}
 				grants, gerr := s.ListGrants(p.ID, envFilter, true)
 				if gerr != nil {
-					log.Printf("adminGrantsPage: list grants for principal %q: %v", p.ID, gerr)
+					reqLogger(r).Printf("adminGrantsPage: list grants for principal %q: %v", p.ID, gerr)
 					data.LookupError = "Could not load grants. Try again."
 				} else {
 					data.Grants = make([]grantJSON, 0, len(grants))
@@ -657,7 +657,7 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 			}
 		}
 		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("adminGrantsPage: render: %v", err)
+			reqLogger(r).Printf("adminGrantsPage: render: %v", err)
 		}
 	}
 }
@@ -704,7 +704,7 @@ func listGrants(s *store.Store) http.HandlerFunc {
 
 		grants, err := s.ListGrants(principalID, environment, true)
 		if err != nil {
-			log.Printf("listGrants: %v", err)
+			reqLogger(r).Printf("listGrants: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -758,7 +758,7 @@ func createGrant(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			log.Printf("createGrant: %v", err)
+			reqLogger(r).Printf("createGrant: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -799,7 +799,7 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			log.Printf("revokeGrant: %v", err)
+			reqLogger(r).Printf("revokeGrant: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -895,7 +895,7 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("adminAgentsPage: generate nonce: %v", err)
+			reqLogger(r).Printf("adminAgentsPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -913,13 +913,13 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 			if errors.Is(perr, store.ErrNotFound) {
 				data.LookupError = fmt.Sprintf("No agent principal found for slug %q.", slug)
 			} else if perr != nil {
-				log.Printf("adminAgentsPage: lookup agent %q: %v", slug, perr)
+				reqLogger(r).Printf("adminAgentsPage: lookup agent %q: %v", slug, perr)
 				data.LookupError = "Could not look up agent. Try again."
 			} else {
 				data.PrincipalID = p.ID
 				creds, cerr := s.ListCredentialsByPrincipal(p.ID)
 				if cerr != nil {
-					log.Printf("adminAgentsPage: list credentials for %q: %v", slug, cerr)
+					reqLogger(r).Printf("adminAgentsPage: list credentials for %q: %v", slug, cerr)
 					data.LookupError = "Could not load credentials. Try again."
 				} else {
 					data.Credentials = make([]credentialJSON, 0, len(creds))
@@ -931,7 +931,7 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 				}
 				grants, gerr := s.ListGrants(p.ID, "", false)
 				if gerr != nil {
-					log.Printf("adminAgentsPage: list grants for %q: %v", slug, gerr)
+					reqLogger(r).Printf("adminAgentsPage: list grants for %q: %v", slug, gerr)
 					data.LookupError = "Could not load grants. Try again."
 				} else {
 					data.Grants = make([]grantJSON, 0, len(grants))
@@ -942,7 +942,7 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 			}
 		}
 		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("adminAgentsPage: render: %v", err)
+			reqLogger(r).Printf("adminAgentsPage: render: %v", err)
 		}
 	}
 }
@@ -963,7 +963,7 @@ func listAgents(s *store.Store) http.HandlerFunc {
 		}
 		principals, err := s.ListPrincipals(store.PrincipalClassAgent)
 		if err != nil {
-			log.Printf("listAgents: %v", err)
+			reqLogger(r).Printf("listAgents: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -1012,7 +1012,7 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 		}
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("handleHomePage: generate nonce: %v", err)
+			reqLogger(r).Printf("handleHomePage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -1040,7 +1040,7 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 							data.DisplayName = info.DisplayName
 							data.DisplayNameAvailable = true
 						} else {
-							log.Printf("handleHomePage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, err)
+							reqLogger(r).Printf("handleHomePage: contacts lookup %q: %v — using contact ID as display name fallback", contactID, err)
 							data.DisplayName = contactID
 							// DisplayNameAvailable stays false — template shows degradation hint
 						}
@@ -1050,7 +1050,7 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 		}
 
 		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("handleHomePage: render: %v", err)
+			reqLogger(r).Printf("handleHomePage: render: %v", err)
 		}
 	}
 }
@@ -1094,12 +1094,12 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 		}
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("handleLoginPage: generate nonce: %v", err)
+			reqLogger(r).Printf("handleLoginPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		if err := tmpl.Execute(w, loginPageData{Nonce: nonce}); err != nil {
-			log.Printf("handleLoginPage: render: %v", err)
+			reqLogger(r).Printf("handleLoginPage: render: %v", err)
 		}
 	}
 }
@@ -1297,7 +1297,7 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", port)
 	log.Printf("Starting lucos_aithne — system=%s, environment=%s, listening on %s", system, environment, addr)
-	if err := http.ListenAndServe(addr, secureHeaders(mux)); err != nil {
+	if err := http.ListenAndServe(addr, withRequestLogger(secureHeaders(mux))); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
