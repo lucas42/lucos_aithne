@@ -359,7 +359,7 @@ func runBootstrapInvite() {
 // After successful exit: update SIGNING_KEK in lucos_creds, then restart the service.
 func runRekey() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
-	newKEKStr := os.Getenv("NEW_SIGNING_KEK")
+	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
 
 	if len(oldKEKStr) != 32 {
 		fmt.Fprintf(os.Stderr, "rekey: SIGNING_KEK must be 32 bytes, got %d\n", len(oldKEKStr))
