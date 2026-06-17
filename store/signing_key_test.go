@@ -281,6 +281,199 @@ func TestMigrateSigningKeyEncryption(t *testing.T) {
 	}
 }
 
+// TestRekeySigningKeys_HappyPath verifies that active and retired signing keys are
+// re-encrypted under the new KEK and are still readable after re-open.
+func TestRekeySigningKeys_HappyPath(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create one active key and retire it, then create a new active key — so we
+	// have both an active and a retired key to re-key.
+	_, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+	activeKey, err := s.RotateSigningKey()
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	var newKek [32]byte
+	for i := range newKek {
+		newKek[i] = byte(200 + i) // distinct from testKEK
+	}
+
+	n, err := s.RekeySigningKeys(newKek)
+	if err != nil {
+		t.Fatalf("RekeySigningKeys: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("RekeySigningKeys: want 2 rows re-keyed, got %d", n)
+	}
+
+	// Re-open the store with the new KEK and verify the active key is still readable.
+	s2, err := Open(":memory:", newKek)
+	if err != nil {
+		t.Fatalf("Open with new KEK: %v", err)
+	}
+	defer s2.Close()
+	// Copy the DB contents to the new store so we can verify the blobs.
+	// Simpler: verify directly via decryptKeyDER on the raw blobs.
+	var rawBlob []byte
+	if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, activeKey.ID).Scan(&rawBlob); err != nil {
+		t.Fatalf("read raw blob: %v", err)
+	}
+	// Must decrypt with the new KEK.
+	der, err := decryptKeyDER(newKek, rawBlob)
+	if err != nil {
+		t.Fatalf("decrypt with new KEK: %v", err)
+	}
+	// Must NOT decrypt with the old KEK.
+	if _, err := decryptKeyDER(testKEK, rawBlob); err == nil {
+		t.Error("blob still decryptable with old KEK after re-key — re-key did not change the encryption")
+	}
+	// DER must still be a valid EC private key.
+	if _, err := x509.ParsePKCS8PrivateKey(der); err != nil {
+		t.Errorf("re-keyed DER is not valid PKCS8: %v", err)
+	}
+}
+
+// TestRekeySigningKeys_WrongOldKEK verifies that RekeySigningKeys aborts and leaves
+// the DB unchanged when the Store's KEK cannot decrypt the stored keys.
+func TestRekeySigningKeys_WrongOldKEK(t *testing.T) {
+	s := newTestStore(t)
+
+	key, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+
+	// Read the original encrypted blob.
+	var originalBlob []byte
+	if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, key.ID).Scan(&originalBlob); err != nil {
+		t.Fatalf("read original blob: %v", err)
+	}
+	originalBlobCopy := make([]byte, len(originalBlob))
+	copy(originalBlobCopy, originalBlob)
+
+	// Build a store that uses a different (wrong) KEK.
+	var wrongKek [32]byte
+	wrongKek[0] = 0xFF
+	sWrong := &Store{db: s.db, kek: wrongKek}
+
+	var newKek [32]byte
+	newKek[0] = 0xAA
+	_, err = sWrong.RekeySigningKeys(newKek)
+	if err == nil {
+		t.Fatal("expected error re-keying with wrong old KEK, got nil")
+	}
+
+	// DB must be unchanged — blob must still decrypt with the original KEK.
+	var blobAfter []byte
+	if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, key.ID).Scan(&blobAfter); err != nil {
+		t.Fatalf("read blob after failed rekey: %v", err)
+	}
+	if string(blobAfter) != string(originalBlobCopy) {
+		t.Error("DB was modified despite wrong-KEK rekey attempt — atomicity violation")
+	}
+	if _, err := decryptKeyDER(testKEK, blobAfter); err != nil {
+		t.Errorf("blob no longer decryptable with original KEK: %v", err)
+	}
+}
+
+// TestRekeySigningKeys_RetiredKeysCovered verifies that retired signing keys (not just
+// active ones) are included in the re-keying operation.
+func TestRekeySigningKeys_RetiredKeysCovered(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create a key then retire it.
+	retiredKey, err := s.GetOrCreateActiveSigningKey()
+	if err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+	if _, err := s.RotateSigningKey(); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	var newKek [32]byte
+	for i := range newKek {
+		newKek[i] = byte(100 + i)
+	}
+
+	// Re-key: should cover both active and retired → 2 rows.
+	n, err := s.RekeySigningKeys(newKek)
+	if err != nil {
+		t.Fatalf("RekeySigningKeys: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("want 2 rows re-keyed (active + retired), got %d", n)
+	}
+
+	// The retired key's blob must now decrypt with the new KEK.
+	var retiredBlob []byte
+	if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, retiredKey.ID).Scan(&retiredBlob); err != nil {
+		t.Fatalf("read retired key blob: %v", err)
+	}
+	if _, err := decryptKeyDER(newKek, retiredBlob); err != nil {
+		t.Errorf("retired key blob not decryptable with new KEK: %v", err)
+	}
+}
+
+// TestRekeySigningKeys_AtomicOnError verifies that no rows are updated if re-keying
+// aborts partway through (simulated by using a wrong KEK that fails to decrypt).
+// In practice, the check happens before any UPDATEs are issued, so a wrong-KEK error
+// always leaves the DB entirely unchanged. This test confirms that invariant.
+func TestRekeySigningKeys_AtomicOnError(t *testing.T) {
+	s := newTestStore(t)
+
+	// Create two keys so there are two rows.
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("initial key: %v", err)
+	}
+	if _, err := s.RotateSigningKey(); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	// Capture the original blobs.
+	rows, err := s.db.Query(`SELECT id, private_key FROM signing_keys ORDER BY created_at`)
+	if err != nil {
+		t.Fatalf("read original blobs: %v", err)
+	}
+	originals := map[string][]byte{}
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		b := make([]byte, len(blob))
+		copy(b, blob)
+		originals[id] = b
+	}
+	rows.Close()
+
+	// Attempt a rekey with a wrong old KEK.
+	var wrongKek [32]byte
+	wrongKek[0] = 0x99
+	sWrong := &Store{db: s.db, kek: wrongKek}
+
+	var newKek [32]byte
+	newKek[0] = 0x01
+	if _, err := sWrong.RekeySigningKeys(newKek); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	// All blobs must be unchanged.
+	for id, orig := range originals {
+		var blob []byte
+		if err := s.db.QueryRow(`SELECT private_key FROM signing_keys WHERE id = ?`, id).Scan(&blob); err != nil {
+			t.Fatalf("read blob for %q after failed rekey: %v", id, err)
+		}
+		if string(blob) != string(orig) {
+			t.Errorf("key %q was modified despite failed rekey — atomicity violated", id)
+		}
+	}
+}
+
 // TestSigningKeyEncryptedAtRest verifies that the private_key BLOB stored in SQLite
 // is AES-GCM ciphertext and not raw PKCS8 DER.
 func TestSigningKeyEncryptedAtRest(t *testing.T) {

@@ -274,6 +274,95 @@ func (s *Store) MigrateSigningKeyEncryption() (int, error) {
 	return len(toMigrate), nil
 }
 
+// RekeySigningKeys re-encrypts all signing key BLOBs (active and retired) under
+// newKek. Call with the service stopped: a concurrent RotateSigningKey during
+// re-keying would create a race on the SQLite write even though SQLite's
+// single-connection serialises it. Safer to stop the service first.
+//
+// Safety properties:
+//   - If decryption of any key with the Store's current KEK fails, the call aborts
+//     immediately and the DB is not modified.
+//   - A round-trip decrypt with newKek is performed for every key before any UPDATE
+//     is issued, catching silent bit-flips or library bugs.
+//   - All UPDATEs run inside a single transaction; a mid-update error rolls back the
+//     entire batch — partial re-keying is never committed to the DB.
+//   - All rows are read into memory before any write (SQLite single-connection
+//     constraint: an open read cursor blocks UPDATEs on the same connection).
+//
+// Returns the count of rows re-keyed. Returns (0, nil) if newKek == s.kek (no-op).
+func (s *Store) RekeySigningKeys(newKek [32]byte) (int, error) {
+	if newKek == s.kek {
+		return 0, nil
+	}
+
+	// Step 1: read all rows into memory (cursor closed before any write).
+	rows, err := s.db.Query(`SELECT id, private_key FROM signing_keys`)
+	if err != nil {
+		return 0, fmt.Errorf("store: rekey signing keys: query: %w", err)
+	}
+	defer rows.Close()
+
+	type entry struct {
+		id      string
+		newBlob []byte
+	}
+	var pending []entry
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return 0, fmt.Errorf("store: rekey signing keys: scan: %w", err)
+		}
+		// Decrypt with the current KEK — abort immediately if this fails.
+		der, err := decryptKeyDER(s.kek, blob)
+		if err != nil {
+			return 0, fmt.Errorf("store: rekey signing keys: key %q: decrypt with old KEK failed (wrong KEK or corrupt DB): %w", id, err)
+		}
+		// Encrypt under the new KEK.
+		newBlob, err := encryptKeyDER(newKek, der)
+		if err != nil {
+			return 0, fmt.Errorf("store: rekey signing keys: key %q: encrypt with new KEK: %w", id, err)
+		}
+		// Round-trip validation: decrypt with newKek and verify plaintext matches.
+		roundTripped, err := decryptKeyDER(newKek, newBlob)
+		if err != nil {
+			return 0, fmt.Errorf("store: rekey signing keys: key %q: round-trip decrypt failed: %w", id, err)
+		}
+		if string(roundTripped) != string(der) {
+			return 0, fmt.Errorf("store: rekey signing keys: key %q: round-trip plaintext mismatch — aborting", id)
+		}
+		pending = append(pending, entry{id: id, newBlob: newBlob})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: rekey signing keys: iterate: %w", err)
+	}
+	// Close the cursor before issuing any UPDATEs (SQLite single-connection).
+	rows.Close()
+
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	// Step 2: apply all UPDATEs in a single transaction (all-or-nothing).
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("store: rekey signing keys: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is best-effort cleanup
+
+	for _, e := range pending {
+		if _, err := tx.Exec(`UPDATE signing_keys SET private_key = ? WHERE id = ?`, e.newBlob, e.id); err != nil {
+			return 0, fmt.Errorf("store: rekey signing keys: update key %q: %w", e.id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: rekey signing keys: commit: %w", err)
+	}
+
+	return len(pending), nil
+}
+
 // --- Internal scan helpers ---
 
 func scanSigningKey(row *sql.Row, kek [32]byte) (*SigningKey, error) {
