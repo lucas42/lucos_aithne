@@ -66,6 +66,15 @@ const healthcheckTimeout = 5 * time.Second
 // signing keys on an auth service.
 const signingKeyRotationInterval = 30 * 24 * time.Hour
 
+// maxSigningKeyAge is the /_info freshness threshold for the active signing key.
+// aithne rotates only at startup (RotateSigningKeyIfOlderThan), so a key older
+// than the rotation interval plus a grace margin means the process has been
+// running long enough without a deploy that rotation is overdue. Surfacing that
+// as an unhealthy check is the safety net that keeps startup-only rotation safe:
+// it prompts a restart/rotation rather than letting the key age unbounded
+// (lucos_aithne#149 cadence decision, #163 health check).
+const maxSigningKeyAge = signingKeyRotationInterval + 5*24*time.Hour
+
 // infoResponse is the `/_info` payload (Tier 1 + Tier 2 fields).
 // Tier 3 fields (icon, show_on_homepage, etc.) are omitted — this is an API-only service.
 type infoResponse struct {
@@ -91,7 +100,11 @@ func getEnvRequired(key string) string {
 func handleInfo(system string, s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const dbDetail = "Checks whether a connection to the SQLite credential store can be established"
+		const signingKeyDetail = "Checks an active signing key exists and can be served via JWKS — estate-wide local token verification depends on it"
+		const signingKeyAgeDetail = "Checks the active signing key has been rotated within the expected interval; aithne rotates only at startup, so an older key means the process has run too long without a deploy and should be restarted/rotated"
 		checks := map[string]any{}
+		metrics := map[string]any{}
+
 		if err := s.Ping(); err != nil {
 			checks["db"] = map[string]any{"ok": false, "techDetail": dbDetail, "debug": err.Error()}
 			log.Printf("/_info db ping failed: %v", err)
@@ -99,10 +112,42 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 			checks["db"] = map[string]any{"ok": true, "techDetail": dbDetail}
 		}
 
+		// Signing-key / JWKS health. Use ListVerificationKeys (read-only) rather
+		// than GetOrCreateActiveSigningKey, which would mint a key as a side
+		// effect of a health poll. The active key is always within the
+		// verification window, so a healthy aithne returns it here.
+		keys, keysErr := s.ListVerificationKeys(token.VerificationWindow)
+		var activeKey *store.SigningKey
+		for _, k := range keys {
+			if k.Status == "active" {
+				activeKey = k
+				break
+			}
+		}
+		switch {
+		case keysErr != nil:
+			checks["signing_key"] = map[string]any{"ok": false, "techDetail": signingKeyDetail, "debug": keysErr.Error()}
+			log.Printf("/_info signing_key check failed: %v", keysErr)
+		case activeKey == nil:
+			checks["signing_key"] = map[string]any{"ok": false, "techDetail": signingKeyDetail, "debug": "no active signing key in verification set — JWKS would serve no usable key"}
+			log.Printf("/_info signing_key check failed: no active signing key")
+		default:
+			checks["signing_key"] = map[string]any{"ok": true, "techDetail": signingKeyDetail}
+			metrics["signing_key_count"] = map[string]any{"value": len(keys), "techDetail": "Signing keys currently published in JWKS (active plus recently-retired within the verification window)"}
+			age := time.Since(activeKey.CreatedAt)
+			metrics["active_signing_key_age_seconds"] = map[string]any{"value": int(age.Seconds()), "techDetail": "Age of the active signing key (last rotation = now − this); aithne rotates it at startup once older than the rotation interval"}
+			if age > maxSigningKeyAge {
+				checks["signing_key_age"] = map[string]any{"ok": false, "techDetail": signingKeyAgeDetail, "debug": fmt.Sprintf("active signing key is %s old (> %s) — rotation is overdue; restart aithne or rotate via the admin endpoint", age.Round(time.Hour), maxSigningKeyAge)}
+				log.Printf("/_info signing_key_age check failed: active key age %s exceeds %s", age.Round(time.Hour), maxSigningKeyAge)
+			} else {
+				checks["signing_key_age"] = map[string]any{"ok": true, "techDetail": signingKeyAgeDetail}
+			}
+		}
+
 		info := infoResponse{
 			System:  system,
 			Checks:  checks,
-			Metrics: map[string]any{},
+			Metrics: metrics,
 			CI:      &ciInfo{Circle: "gh/lucas42/lucos_aithne"},
 			Title:   "Aithne",
 		}
