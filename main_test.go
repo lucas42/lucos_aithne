@@ -2381,6 +2381,264 @@ func TestClientCredentials_RevokedKey(t *testing.T) {
 	}
 }
 
+// --- Per-token scope downscoping tests (RFC 6749 §4.4 scope parameter) ---
+
+// grantScopes is a test helper that grants the named scopes to the named agent
+// in the given environment, using testMainVocab.
+func grantScopes(t *testing.T, s *store.Store, agentSlug, environment string, scopes ...string) {
+	t.Helper()
+	p, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, agentSlug)
+	if err != nil {
+		t.Fatalf("grantScopes: GetPrincipalByExternalID(%q): %v", agentSlug, err)
+	}
+	vocab, _ := parseScopesYAML([]byte("scopes:\n  - aithne:admin\n  - render-ui\n  - arachne:read\n"))
+	for _, sc := range scopes {
+		if _, err := s.CreateGrant(p.ID, sc, environment, "test", vocab); err != nil {
+			t.Fatalf("grantScopes: CreateGrant(%q, %q, %q): %v", agentSlug, sc, environment, err)
+		}
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_Subset verifies that an agent with multiple
+// granted scopes can request a narrower subset, and the token carries only that subset.
+func TestClientCredentials_ScopeDownscoping_Subset(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-scope-agent")
+	grantScopes(t, s, "lucos-scope-agent", "development", "aithne:admin", "render-ui")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-scope-agent&client_secret=" + rawSecret + "&scope=render-ui")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp tokenSuccessResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// The response scope field must echo the requested (narrowed) set.
+	if resp.Scope != "render-ui" {
+		t.Errorf("scope in response: got %q, want %q", resp.Scope, "render-ui")
+	}
+
+	// The JWT must carry only render-ui, not aithne:admin.
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(resp.AccessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "render-ui" {
+		t.Errorf("JWT scopes: got %v, want [render-ui]", claims.Scopes)
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_UngrantedScope verifies that requesting a
+// scope not held by the principal returns 400 invalid_scope.
+func TestClientCredentials_ScopeDownscoping_UngrantedScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-ungranted-agent")
+	grantScopes(t, s, "lucos-ungranted-agent", "development", "render-ui")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-ungranted-agent&client_secret=" + rawSecret + "&scope=aithne:admin")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var errResp tokenErrorResponse
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp.Error != "invalid_scope" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_scope")
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_OmittedScope verifies that omitting the
+// scope parameter returns the full granted set (backwards-compatible behaviour).
+func TestClientCredentials_ScopeDownscoping_OmittedScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-omit-scope-agent")
+	grantScopes(t, s, "lucos-omit-scope-agent", "development", "render-ui", "aithne:admin")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-omit-scope-agent&client_secret=" + rawSecret)
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp tokenSuccessResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+
+	// JWT must carry both granted scopes.
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(resp.AccessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if len(claims.Scopes) != 2 {
+		t.Errorf("omitted scope: expected 2 scopes in JWT, got %v", claims.Scopes)
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_EmptyScope verifies that an empty scope
+// parameter is treated as omitted (full granted set issued).
+func TestClientCredentials_ScopeDownscoping_EmptyScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-empty-scope-agent")
+	grantScopes(t, s, "lucos-empty-scope-agent", "development", "render-ui")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-empty-scope-agent&client_secret=" + rawSecret + "&scope=")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for empty scope (treated as omitted), got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp tokenSuccessResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(resp.AccessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "render-ui" {
+		t.Errorf("empty scope: expected full granted set [render-ui], got %v", claims.Scopes)
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_Duplicates verifies that duplicate scope
+// tokens in the request are collapsed — the JWT carries each scope once.
+func TestClientCredentials_ScopeDownscoping_Duplicates(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-dup-scope-agent")
+	grantScopes(t, s, "lucos-dup-scope-agent", "development", "render-ui")
+
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-dup-scope-agent&client_secret=" + rawSecret + "&scope=render-ui+render-ui")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp tokenSuccessResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(resp.AccessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "render-ui" {
+		t.Errorf("duplicates: expected [render-ui] (deduped), got %v", claims.Scopes)
+	}
+}
+
+// TestClientCredentials_ScopeDownscoping_WrongEnv verifies that a scope granted only
+// in another environment is not honoured in the current environment (grants are per-env).
+func TestClientCredentials_ScopeDownscoping_WrongEnv(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	rawSecret := provisionMachineKey(t, s, "lucos-wrongenv-agent")
+	// Grant render-ui in production only — not in development.
+	vocab, _ := parseScopesYAML([]byte("scopes:\n  - render-ui\n"))
+	p, _ := s.GetPrincipalByExternalID(store.PrincipalClassAgent, "lucos-wrongenv-agent")
+	if _, err := s.CreateGrant(p.ID, "render-ui", "production", "test", vocab); err != nil {
+		t.Fatalf("CreateGrant production: %v", err)
+	}
+
+	// The mux uses "development" — render-ui is not granted there.
+	body := strings.NewReader("grant_type=client_credentials&client_id=lucos-wrongenv-agent&client_secret=" + rawSecret + "&scope=render-ui")
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	newMachineAuthMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for scope not granted in current env, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var errResp tokenErrorResponse
+	_ = json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp.Error != "invalid_scope" {
+		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_scope")
+	}
+}
+
+// TestParseScopeParam verifies the scope string parsing helper independently.
+func TestParseScopeParam(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"render-ui", []string{"render-ui"}},
+		{"render-ui aithne:admin", []string{"render-ui", "aithne:admin"}},
+		{"render-ui render-ui", []string{"render-ui"}},          // dedup
+		{"  render-ui  aithne:admin  ", []string{"render-ui", "aithne:admin"}}, // whitespace
+	}
+	for _, tc := range cases {
+		got := parseScopeParam(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("parseScopeParam(%q): got %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("parseScopeParam(%q)[%d]: got %q, want %q", tc.input, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 // --- Admin machine-key revocation tests ---
 
 // newAgentsMux builds a test ServeMux covering the agents + machine-key routes.

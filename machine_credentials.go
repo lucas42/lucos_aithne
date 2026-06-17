@@ -53,10 +53,14 @@ func hashMachineKey(rawSecret string) string {
 // --- OAuth2 token endpoint ---
 
 // tokenSuccessResponse is the RFC 6749 §5.1 success payload.
+// Scope echoes the effective scope list (space-delimited per RFC 6749 §3.3).
+// It is included whenever a scope was issued, and required by §5.1 when the
+// issued set differs from the requested set.
 type tokenSuccessResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int    `json:"expires_in"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 // tokenErrorResponse is the RFC 6749 §5.2 error payload.
@@ -132,6 +136,34 @@ func handleClientCredentials(s *store.Store, issuer, environment string) http.Ha
 	}
 }
 
+// parseScopeParam splits an OAuth2 scope string (space-delimited per RFC 6749 §3.3)
+// into a deduplicated, order-preserved slice of non-empty scope tokens.
+// Returns nil when s is empty or whitespace-only (treated as "scope omitted").
+func parseScopeParam(s string) []string {
+	parts := strings.Fields(s) // splits on any whitespace, drops empty tokens
+	if len(parts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// toSet converts a string slice to a set (map[string]bool) for O(1) membership tests.
+func toSet(ss []string) map[string]bool {
+	m := make(map[string]bool, len(ss))
+	for _, s := range ss {
+		m[s] = true
+	}
+	return m
+}
+
 // handleClientCredentialsGrant implements the client_credentials grant.
 // Called after grant_type has been confirmed; r.ParseForm() must have run.
 func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w http.ResponseWriter, r *http.Request) {
@@ -184,11 +216,27 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	}
 
 	// Collect active scopes for this principal in the current environment.
-	scopes, err := s.GetActiveScopes(principal.ID, environment)
+	granted, err := s.GetActiveScopes(principal.ID, environment)
 	if err != nil {
 		log.Printf("handleClientCredentialsGrant: get scopes for %s: %v", principal.ID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
+	}
+
+	// Honour the optional RFC 6749 §4.4 scope parameter.
+	// If omitted/empty: issue the full granted set (backwards-compatible).
+	// If present: intersect with granted; reject any scope not in the granted set.
+	effective := granted
+	if requested := parseScopeParam(r.FormValue("scope")); len(requested) > 0 {
+		grantedSet := toSet(granted)
+		for _, sc := range requested {
+			if !grantedSet[sc] {
+				writeTokenError(w, http.StatusBadRequest, "invalid_scope",
+					fmt.Sprintf("scope %q is not granted to this principal in %s", sc, environment))
+				return
+			}
+		}
+		effective = requested
 	}
 
 	// Obtain the active signing key.
@@ -200,7 +248,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	}
 
 	// Mint a short-lived session JWT — identical format to the human login path.
-	tokenStr, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
+	tokenStr, err := token.MintSession(principal, effective, signingKey, issuer, "l42.eu", 0)
 	if err != nil {
 		log.Printf("handleClientCredentialsGrant: mint session: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
@@ -213,6 +261,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 		AccessToken: tokenStr,
 		TokenType:   "Bearer",
 		ExpiresIn:   int(token.DefaultSessionTTL.Seconds()),
+		Scope:       strings.Join(effective, " "),
 	})
 }
 
