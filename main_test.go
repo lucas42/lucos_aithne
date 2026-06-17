@@ -237,6 +237,12 @@ func TestInfoEndpoint_StaleSigningKey(t *testing.T) {
 const testIssuer = "http://aithne.test"
 const testAudience = "l42.eu"
 
+// noopLimiter returns a keyedLimiter with a very high limit, suitable for tests
+// that exercise endpoint behaviour without triggering rate limiting.
+func noopLimiter() *keyedLimiter {
+	return newKeyedLimiter(1_000_000, time.Minute)
+}
+
 // testMainKEK is a deterministic 32-byte KEK used by main_test.go tests.
 // Must not be used in production. The store package has its own testKEK.
 var testMainKEK = [32]byte{
@@ -1029,7 +1035,7 @@ func TestEnrolBegin_RejectsNonPost(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/enrol/begin?token=any", nil)
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for GET, got %d", rr.Code)
@@ -1048,7 +1054,7 @@ func TestEnrolBegin_MissingToken(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin", strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for missing token, got %d", rr.Code)
@@ -1067,7 +1073,7 @@ func TestEnrolBegin_InvalidToken(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token=nonexistent", strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for invalid token, got %d", rr.Code)
@@ -1094,7 +1100,7 @@ func TestEnrolBegin_ValidToken_ReturnsOptions(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
@@ -1137,7 +1143,7 @@ func TestEnrolBegin_UsesContactDisplayName(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
@@ -1185,7 +1191,7 @@ func TestEnrolBegin_FallsBackToContactIDWhenContactsUnavailable(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	rr := httptest.NewRecorder()
-	handleEnrolBegin(s, wa, cs, contacts)(rr, req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(rr, req)
 
 	// Registration should still succeed — contacts failure is non-fatal.
 	if rr.Code != http.StatusOK {
@@ -1221,7 +1227,7 @@ func TestEnrolBegin_DoesNotConsumeInvite(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/enrol/begin?token="+rawToken, strings.NewReader("{}"))
 	httptest.NewRecorder() // discard response
-	handleEnrolBegin(s, wa, cs, contacts)(httptest.NewRecorder(), req)
+	handleEnrolBegin(s, wa, cs, contacts, noopLimiter())(httptest.NewRecorder(), req)
 
 	// Invite must still be valid after begin.
 	inv, err := s.GetInviteByRawToken(rawToken)
@@ -1827,7 +1833,7 @@ func TestLoginBegin_GhostPrincipal(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/begin", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
-	handleLoginBegin(s, wa, cs)(rr, req)
+	handleLoginBegin(s, wa, cs, noopLimiter())(rr, req)
 
 	// Security rule #3: ghost principals and no-credentials are both 404 to
 	// prevent contact-ID enumeration.
@@ -1854,7 +1860,7 @@ func TestLoginBegin_PrincipalWithNoCredentials(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/begin", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
-	handleLoginBegin(s, wa, cs)(rr, req)
+	handleLoginBegin(s, wa, cs, noopLimiter())(rr, req)
 
 	// Security rule #3: same 404 whether principal is missing or has no creds.
 	if rr.Code != http.StatusNotFound {
@@ -1876,7 +1882,7 @@ func TestLoginBegin_EmptyContactID_Discoverable(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/begin", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
-	handleLoginBegin(s, wa, cs)(rr, req)
+	handleLoginBegin(s, wa, cs, noopLimiter())(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for discoverable login begin, got %d\n%s", rr.Code, rr.Body.String())
@@ -2004,7 +2010,7 @@ func TestCeremonyStore_OneTimeUse(t *testing.T) {
 // admin/machine-keys, and admin/machine-keys/{id} endpoints registered.
 func newMachineAuthMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, testIssuer, "development"))
+	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, testIssuer, "development", noopLimiter()))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
 	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, testIssuer, handleAdminMachineKeyByID(s)))
 	return mux
@@ -3003,7 +3009,7 @@ func newOIDCMux(s *store.Store) *http.ServeMux {
 		return s.ListVerificationKeys(token.VerificationWindow)
 	}))
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, testIssuer, "development"))
-	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development"))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter()))
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, testIssuer, nil))
 	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))

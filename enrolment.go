@@ -501,10 +501,19 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 // so that passkeys are labelled with the person's real name rather than the
 // numeric contact ID. A contacts lookup failure is non-fatal: the ceremony
 // proceeds with the contact ID as the display name fallback.
-func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore, contacts *contactsClient) http.HandlerFunc {
+func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore, contacts *contactsClient, ceremonyLimiter *keyedLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Per-IP rate limiting: same limiter as login/begin defends ceremony session memory.
+		ip := clientIP(r)
+		if ok, count := ceremonyLimiter.Allow(ip); !ok {
+			reqLogger(r).Printf("rate limit exceeded: %s ip=%q count=%d window=%s", r.URL.Path, ip, count, ceremonyBeginWindow)
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "429 Too Many Requests — too many enrolment attempts from this IP, retry after 60 seconds", http.StatusTooManyRequests)
 			return
 		}
 

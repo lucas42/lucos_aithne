@@ -80,6 +80,26 @@ func newCeremonyStore() *ceremonyStore {
 	}
 }
 
+// sweepExpired removes all expired entries from both ceremony maps.
+// Called by a background goroutine in main() on a ticker so that memory is
+// reclaimed even when no new ceremonies are started (previously only the
+// opportunistic cleanup in put/putEnrol ran, which required a new request).
+func (cs *ceremonyStore) sweepExpired() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	now := time.Now()
+	for k, e := range cs.entries {
+		if now.After(e.expiresAt) {
+			delete(cs.entries, k)
+		}
+	}
+	for k, e := range cs.enrol {
+		if now.After(e.expiresAt) {
+			delete(cs.enrol, k)
+		}
+	}
+}
+
 // put stores session data under key. Overwrites any prior entry (new begin
 // invalidates a previous pending ceremony for the same user+type).
 func (cs *ceremonyStore) put(key string, data *gwebauthn.SessionData) {
@@ -229,12 +249,22 @@ type loginBeginRequest struct {
 	ContactID string `json:"contact_id"`
 }
 
-func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore) http.HandlerFunc {
+func handleLoginBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore, ceremonyLimiter *keyedLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		// Per-IP rate limiting: defend against ceremony-session memory exhaustion.
+		ip := clientIP(r)
+		if ok, count := ceremonyLimiter.Allow(ip); !ok {
+			reqLogger(r).Printf("rate limit exceeded: %s ip=%q count=%d window=%s", r.URL.Path, ip, count, ceremonyBeginWindow)
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "429 Too Many Requests — too many login attempts from this IP, retry after 60 seconds", http.StatusTooManyRequests)
+			return
+		}
+
 		var req loginBeginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "400 Bad Request — invalid JSON", http.StatusBadRequest)
