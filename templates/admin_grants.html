@@ -57,9 +57,13 @@
               <td>{{if eq .GrantedBy $.ContactID}}{{$.ContactDisplayName}}{{if not $.ContactNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}{{else}}{{.GrantedBy}}{{end}}</td>
               <td>{{.GrantedAt}}</td>
               <td>
+                {{if not .RevokedAt}}
                 <button class="revoke-btn"
                         data-grant-id="{{.ID}}"
                         aria-label="Revoke {{.Scope}} ({{.Environment}})">Revoke</button>
+                {{else}}
+                <span class="status-revoked" title="Revoked {{.RevokedAt}}">Revoked</span>
+                {{end}}
               </td>
             </tr>
             {{end}}
@@ -193,19 +197,11 @@
             this.textContent = origLabel;
             return;
           }
-          // Remove the row; show empty state if none remain.
-          const row = document.getElementById('grant-' + grantId);
-          if (row) row.remove();
-          const body = document.getElementById('grantsBody');
-          if (body && body.rows.length === 0) {
-            const tbl = body.closest('table');
-            if (tbl) {
-              const empty = document.createElement('p');
-              empty.className = 'empty';
-              empty.textContent = 'No active grants.';
-              tbl.parentNode.insertBefore(empty, tbl);
-              tbl.remove();
-            }
+          // Swap button for a revoked badge in-place — keeps the row visible
+          // and consistent with what the page shows on a fresh load.
+          const cell = this.closest('td');
+          if (cell) {
+            cell.innerHTML = '<span class="status-revoked">Revoked</span>';
           }
         } catch (_) {
           showError('Something went wrong. Try again.');
