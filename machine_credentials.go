@@ -184,9 +184,10 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, to
 	}
 	if ok, count := tokenLimiter.Allow(limitKey); !ok {
 		reqLogger(r).Printf("rate limit exceeded: %s client_id=%q count=%d window=%s", r.URL.Path, clientID, count, tokenEndpointWindow)
-		w.Header().Set("Retry-After", "60")
+		retryAfter := fmt.Sprintf("%d", int(tokenEndpointWindow.Seconds()))
+		w.Header().Set("Retry-After", retryAfter)
 		writeTokenError(w, http.StatusTooManyRequests, "rate_limited",
-			"too many authentication attempts for this client — retry after 60 seconds")
+			"too many authentication attempts for this client — retry after "+retryAfter+" seconds")
 		return
 	}
 

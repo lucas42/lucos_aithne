@@ -186,8 +186,9 @@ func TestRateLimit_TokenEndpoint_429OnBreach(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("3rd request: expected 429, got %d\nbody: %s", rr.Code, rr.Body.String())
 	}
-	if ra := rr.Header().Get("Retry-After"); ra != "60" {
-		t.Errorf("3rd request: Retry-After header: got %q, want %q", ra, "60")
+	wantRetryAfter := fmt.Sprintf("%d", int(tokenEndpointWindow.Seconds()))
+	if ra := rr.Header().Get("Retry-After"); ra != wantRetryAfter {
+		t.Errorf("3rd request: Retry-After header: got %q, want %q", ra, wantRetryAfter)
 	}
 	var errResp struct {
 		Error string `json:"error"`
@@ -260,8 +261,9 @@ func TestRateLimit_LoginBegin_429OnBreach(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("3rd request: expected 429, got %d\nbody: %s", rr.Code, rr.Body.String())
 	}
-	if ra := rr.Header().Get("Retry-After"); ra != "60" {
-		t.Errorf("Retry-After header: got %q, want %q", ra, "60")
+	wantRetryAfter := fmt.Sprintf("%d", int(ceremonyBeginWindow.Seconds()))
+	if ra := rr.Header().Get("Retry-After"); ra != wantRetryAfter {
+		t.Errorf("Retry-After header: got %q, want %q", ra, wantRetryAfter)
 	}
 }
 
@@ -295,8 +297,9 @@ func TestRateLimit_EnrolBegin_429OnBreach(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("3rd request: expected 429, got %d\nbody: %s", rr.Code, rr.Body.String())
 	}
-	if ra := rr.Header().Get("Retry-After"); ra != "60" {
-		t.Errorf("Retry-After header: got %q, want %q", ra, "60")
+	wantRetryAfterEnrol := fmt.Sprintf("%d", int(ceremonyBeginWindow.Seconds()))
+	if ra := rr.Header().Get("Retry-After"); ra != wantRetryAfterEnrol {
+		t.Errorf("Retry-After header: got %q, want %q", ra, wantRetryAfterEnrol)
 	}
 }
 

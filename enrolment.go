@@ -512,8 +512,9 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 		ip := clientIP(r)
 		if ok, count := ceremonyLimiter.Allow(ip); !ok {
 			reqLogger(r).Printf("rate limit exceeded: %s ip=%q count=%d window=%s", r.URL.Path, ip, count, ceremonyBeginWindow)
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "429 Too Many Requests — too many enrolment attempts from this IP, retry after 60 seconds", http.StatusTooManyRequests)
+			retryAfter := fmt.Sprintf("%d", int(ceremonyBeginWindow.Seconds()))
+			w.Header().Set("Retry-After", retryAfter)
+			http.Error(w, "429 Too Many Requests — too many enrolment attempts from this IP, retry after "+retryAfter+" seconds", http.StatusTooManyRequests)
 			return
 		}
 
