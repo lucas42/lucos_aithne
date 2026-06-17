@@ -23,6 +23,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -171,7 +172,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 		if c.RevokedAt != nil {
 			continue // skip revoked keys — revocation is enforced here
 		}
-		if string(c.Data) == secretHash {
+		if subtle.ConstantTimeCompare(c.Data, []byte(secretHash)) == 1 {
 			matched = true
 			break
 		}
