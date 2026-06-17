@@ -521,7 +521,9 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 // (claimsContextKey) and the raw JWT string (rawTokenContextKey) into the
 // request context so handlers can embed the token in HTML templates for AJAX.
 // Unauthenticated requests are redirected to /auth/login?next=<current path>.
+// Authenticated users who lack aithne:admin are shown a styled HTML 403 page.
 func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
+	accessDeniedTmpl := template.Must(template.ParseFS(templateFS, "templates/access_denied.html"))
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("aithne_session")
 		if err != nil {
@@ -559,7 +561,16 @@ func requireAdminScopeFromCookie(s *store.Store, issuer string, next http.Handle
 			}
 		}
 		if !hasAdmin {
-			http.Error(w, "403 Forbidden — aithne:admin scope required", http.StatusForbidden)
+			nonce, err := applyPageCSP(w)
+			if err != nil {
+				reqLogger(r).Printf("requireAdminScopeFromCookie: generate nonce: %v", err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			if err := accessDeniedTmpl.Execute(w, accessDeniedPageData{Nonce: nonce}); err != nil {
+				reqLogger(r).Printf("requireAdminScopeFromCookie: render access denied: %v", err)
+			}
 			return
 		}
 
@@ -847,6 +858,11 @@ func generateNonce() (string, error) {
 
 // loginPageData holds the per-request data injected into templates/login.html.
 type loginPageData struct {
+	Nonce string
+}
+
+// accessDeniedPageData holds the per-request data for templates/access_denied.html.
+type accessDeniedPageData struct {
 	Nonce string
 }
 
