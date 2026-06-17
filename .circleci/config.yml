@@ -37,6 +37,7 @@ workflows:
           requires:
             - fetch-scopes
       - lucos/build:
+          serial-group: << pipeline.project.slug >>/build/<< pipeline.git.branch >>
           platform: "linux/amd64"
       - lucos/deploy-avalon:
           serial-group: deploy-avalon
