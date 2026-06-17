@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -165,7 +164,7 @@ func handleAdminContacts(contacts *contactsClient) http.HandlerFunc {
 		}
 		items, err := contacts.List()
 		if err != nil {
-			log.Printf("handleAdminContacts: %v", err)
+			reqLogger(r).Printf("handleAdminContacts: %v", err)
 			if errors.Is(err, errContactsDecodeFailure) {
 				http.Error(w, "502 Bad Gateway — contacts service returned unparseable response", http.StatusBadGateway)
 			} else {
@@ -175,7 +174,7 @@ func handleAdminContacts(contacts *contactsClient) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(items); err != nil {
-			log.Printf("handleAdminContacts: encode: %v", err)
+			reqLogger(r).Printf("handleAdminContacts: encode: %v", err)
 		}
 	}
 }
@@ -256,13 +255,13 @@ func handleAdminEnrolPage() http.HandlerFunc {
 		}
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("handleAdminEnrolPage: generate nonce: %v", err)
+			reqLogger(r).Printf("handleAdminEnrolPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
 		if err := tmpl.Execute(w, adminEnrolPageData{SessionToken: sessionToken, Nonce: nonce}); err != nil {
-			log.Printf("handleAdminEnrolPage: render: %v", err)
+			reqLogger(r).Printf("handleAdminEnrolPage: render: %v", err)
 		}
 	}
 }
@@ -309,7 +308,7 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 			http.Error(w, "422 Unprocessable Entity — contact_id not found in lucos_contacts", http.StatusUnprocessableEntity)
 			return
 		} else if err != nil {
-			log.Printf("admin/invites: contacts lookup %q: %v", req.ContactID, err)
+			reqLogger(r).Printf("admin/invites: contacts lookup %q: %v", req.ContactID, err)
 			http.Error(w, "503 Service Unavailable — could not verify contact", http.StatusServiceUnavailable)
 			return
 		}
@@ -319,12 +318,12 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 		_, err = s.GetPrincipalByExternalID(store.PrincipalClassHuman, req.ContactID)
 		if errors.Is(err, store.ErrNotFound) {
 			if _, err = s.CreatePrincipal(store.PrincipalClassHuman, req.ContactID); err != nil {
-				log.Printf("admin/invites: create principal %q: %v", req.ContactID, err)
+				reqLogger(r).Printf("admin/invites: create principal %q: %v", req.ContactID, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 		} else if err != nil {
-			log.Printf("admin/invites: lookup principal %q: %v", req.ContactID, err)
+			reqLogger(r).Printf("admin/invites: lookup principal %q: %v", req.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -337,7 +336,7 @@ func handleAdminInvites(s *store.Store, contacts *contactsClient, appOrigin stri
 
 		inv, err := s.CreateInvite(rawToken, req.ContactID, claims.Subject)
 		if err != nil {
-			log.Printf("admin/invites: create invite for %q: %v", req.ContactID, err)
+			reqLogger(r).Printf("admin/invites: create invite for %q: %v", req.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -391,12 +390,12 @@ func handleAdminInviteByHash(s *store.Store) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			log.Printf("revokeInvite: %v", err)
+			reqLogger(r).Printf("revokeInvite: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
-		log.Printf("Invite revoked — hash: %s, revoked_by: %s", tokenHash, claims.Subject)
+		reqLogger(r).Printf("Invite revoked — hash: %s, revoked_by: %s", tokenHash, claims.Subject)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -423,14 +422,14 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 
 		nonce, err := applyPageCSP(w)
 		if err != nil {
-			log.Printf("handleEnrolPage: generate nonce: %v", err)
+			reqLogger(r).Printf("handleEnrolPage: generate nonce: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
 		renderError := func(reason string) {
 			if err := errorTmpl.Execute(w, enrolErrorPageData{Reason: reason, Nonce: nonce}); err != nil {
-				log.Printf("handleEnrolPage: render error (%s): %v", reason, err)
+				reqLogger(r).Printf("handleEnrolPage: render error (%s): %v", reason, err)
 			}
 		}
 
@@ -448,7 +447,7 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			return
 		}
 		if err != nil {
-			log.Printf("enrol: get invite: %v", err)
+			reqLogger(r).Printf("enrol: get invite: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -457,7 +456,7 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 		info, err := contacts.Get(inv.ContactID)
 		displayNameAvailable := true
 		if err != nil {
-			log.Printf("enrol: contacts lookup %q: %v", inv.ContactID, err)
+			reqLogger(r).Printf("enrol: contacts lookup %q: %v", inv.ContactID, err)
 			// Non-fatal: render with contact ID as fallback name.
 			info = &contactInfo{DisplayName: inv.ContactID}
 			displayNameAvailable = false
@@ -486,7 +485,7 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			IsRecovery:           isRecovery,
 			Nonce:                nonce,
 		}); err != nil {
-			log.Printf("handleEnrolPage: render: %v", err)
+			reqLogger(r).Printf("handleEnrolPage: render: %v", err)
 		}
 	}
 }
@@ -522,7 +521,7 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 			return
 		}
 		if err != nil {
-			log.Printf("enrol/begin: get invite: %v", err)
+			reqLogger(r).Printf("enrol/begin: get invite: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -531,12 +530,12 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 		p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, inv.ContactID)
 		if errors.Is(err, store.ErrNotFound) {
 			// Principal should have been created at admin/invites time; log and surface.
-			log.Printf("enrol/begin: principal not found for contact %q", inv.ContactID)
+			reqLogger(r).Printf("enrol/begin: principal not found for contact %q", inv.ContactID)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		if err != nil {
-			log.Printf("enrol/begin: lookup principal %q: %v", inv.ContactID, err)
+			reqLogger(r).Printf("enrol/begin: lookup principal %q: %v", inv.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -548,7 +547,7 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 		if info, err := contacts.Get(inv.ContactID); err == nil {
 			displayName = info.DisplayName
 		} else {
-			log.Printf("enrol/begin: contacts lookup %q: %v — using contact ID as display name fallback", inv.ContactID, err)
+			reqLogger(r).Printf("enrol/begin: contacts lookup %q: %v — using contact ID as display name fallback", inv.ContactID, err)
 		}
 
 		// For re-enrolment: pass an empty exclude list so the ceremony always
@@ -557,7 +556,7 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 
 		creation, sessionData, err := wa.BeginRegistration(user)
 		if err != nil {
-			log.Printf("enrol/begin: BeginRegistration %q: %v", inv.ContactID, err)
+			reqLogger(r).Printf("enrol/begin: BeginRegistration %q: %v", inv.ContactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -568,7 +567,7 @@ func handleEnrolBegin(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore,
 
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(creation); err != nil {
-			log.Printf("enrol/begin: encode options: %v", err)
+			reqLogger(r).Printf("enrol/begin: encode options: %v", err)
 		}
 	}
 }
@@ -607,12 +606,12 @@ func handleEnrolFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		// Load the principal — the contact_id comes from our session, not the client.
 		p, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
 		if errors.Is(err, store.ErrNotFound) {
-			log.Printf("enrol/finish: principal not found for contact %q", contactID)
+			reqLogger(r).Printf("enrol/finish: principal not found for contact %q", contactID)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		if err != nil {
-			log.Printf("enrol/finish: lookup principal %q: %v", contactID, err)
+			reqLogger(r).Printf("enrol/finish: lookup principal %q: %v", contactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -621,7 +620,7 @@ func handleEnrolFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		// Complete the WebAuthn ceremony.
 		credential, err := wa.FinishRegistration(user, *sessionData, r)
 		if err != nil {
-			log.Printf("enrol/finish: FinishRegistration %q: %v", contactID, err)
+			reqLogger(r).Printf("enrol/finish: FinishRegistration %q: %v", contactID, err)
 			http.Error(w, "400 Bad Request — registration verification failed", http.StatusBadRequest)
 			return
 		}
@@ -629,14 +628,14 @@ func handleEnrolFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		// Validate + serialise the credential (security rule #2).
 		data, err := store.MarshalWebAuthnCredential(credential)
 		if err != nil {
-			log.Printf("enrol/finish: marshal credential: %v", err)
+			reqLogger(r).Printf("enrol/finish: marshal credential: %v", err)
 			http.Error(w, "400 Bad Request — invalid credential structure", http.StatusBadRequest)
 			return
 		}
 
 		// Atomic: wipe old creds + register new + consume invite.
 		if _, err := s.ReplaceWebAuthnCredentialAndConsumeInvite(p.ID, rawToken, data, label); err != nil {
-			log.Printf("enrol/finish: replace credential for %q: %v", contactID, err)
+			reqLogger(r).Printf("enrol/finish: replace credential for %q: %v", contactID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}

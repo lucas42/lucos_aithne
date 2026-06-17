@@ -31,7 +31,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -127,7 +126,7 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 			return
 		}
 		if err != nil {
-			log.Printf("handleAuthorize: get client %q: %v", clientID, err)
+			reqLogger(r).Printf("handleAuthorize: get client %q: %v", clientID, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -181,13 +180,13 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
-			log.Printf("handleAuthorize: list verification keys: %v", err)
+			reqLogger(r).Printf("handleAuthorize: list verification keys: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
-			log.Printf("handleAuthorize: build key set: %v", err)
+			reqLogger(r).Printf("handleAuthorize: build key set: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -206,26 +205,26 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 		// Look up the principal by external identity to get the internal ID.
 		principal, err := s.GetPrincipalByExternalID(claims.PrincipalClass, claims.Subject)
 		if errors.Is(err, store.ErrNotFound) {
-			log.Printf("handleAuthorize: principal not found for %s %q", claims.PrincipalClass, claims.Subject)
+			reqLogger(r).Printf("handleAuthorize: principal not found for %s %q", claims.PrincipalClass, claims.Subject)
 			redirectError("server_error", "principal not found")
 			return
 		}
 		if err != nil {
-			log.Printf("handleAuthorize: get principal: %v", err)
+			reqLogger(r).Printf("handleAuthorize: get principal: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
 		rawCode, err := store.GenerateRawCode()
 		if err != nil {
-			log.Printf("handleAuthorize: generate code: %v", err)
+			reqLogger(r).Printf("handleAuthorize: generate code: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
 		expiresAt := time.Now().Add(authCodeTTL)
 		if err := s.CreateOIDCAuthCode(rawCode, clientID, principal.ID, redirectURIStr, scopeStr, nonce, expiresAt); err != nil {
-			log.Printf("handleAuthorize: create auth code: %v", err)
+			reqLogger(r).Printf("handleAuthorize: create auth code: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -260,7 +259,7 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 		return
 	}
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: get client %q: %v", clientID, err)
+		reqLogger(r).Printf("handleAuthCodeGrant: get client %q: %v", clientID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -287,7 +286,7 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code has already been used")
 		return
 	case err != nil:
-		log.Printf("handleAuthCodeGrant: get auth code: %v", err)
+		reqLogger(r).Printf("handleAuthCodeGrant: get auth code: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -312,7 +311,7 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code has already been used")
 		return
 	case err != nil:
-		log.Printf("handleAuthCodeGrant: consume auth code: %v", err)
+		reqLogger(r).Printf("handleAuthCodeGrant: consume auth code: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -320,12 +319,12 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 	// Load the principal to mint tokens.
 	principal, err := s.GetPrincipalByID(authCode.PrincipalID)
 	if errors.Is(err, store.ErrNotFound) {
-		log.Printf("handleAuthCodeGrant: principal %q not found", authCode.PrincipalID)
+		reqLogger(r).Printf("handleAuthCodeGrant: principal %q not found", authCode.PrincipalID)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "principal not found")
 		return
 	}
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: get principal %q: %v", authCode.PrincipalID, err)
+		reqLogger(r).Printf("handleAuthCodeGrant: get principal %q: %v", authCode.PrincipalID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -333,14 +332,14 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 	// Collect active scopes (aithne authorisation scopes, not OIDC scopes).
 	scopes, err := s.GetActiveScopes(principal.ID, environment)
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: get scopes for %s: %v", principal.ID, err)
+		reqLogger(r).Printf("handleAuthCodeGrant: get scopes for %s: %v", principal.ID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
 
 	signingKey, err := s.GetOrCreateActiveSigningKey()
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: get signing key: %v", err)
+		reqLogger(r).Printf("handleAuthCodeGrant: get signing key: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -349,7 +348,7 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 	// (audience "l42.eu", carries aithne scopes from the grant store).
 	accessToken, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: mint access token: %v", err)
+		reqLogger(r).Printf("handleAuthCodeGrant: mint access token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -357,7 +356,7 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 	// Mint the OIDC ID token — audience is the client_id, nonce forwarded.
 	idToken, err := token.MintIDToken(principal, clientID, authCode.Nonce, signingKey, issuer, 0)
 	if err != nil {
-		log.Printf("handleAuthCodeGrant: mint id_token: %v", err)
+		reqLogger(r).Printf("handleAuthCodeGrant: mint id_token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -395,13 +394,13 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
-			log.Printf("handleUserinfo: list verification keys: %v", err)
+			reqLogger(r).Printf("handleUserinfo: list verification keys: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
-			log.Printf("handleUserinfo: build key set: %v", err)
+			reqLogger(r).Printf("handleUserinfo: build key set: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -425,7 +424,7 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 				resp["name"] = info.DisplayName
 			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 				// Log but don't fail — contacts lookup is best-effort.
-				log.Printf("handleUserinfo: contacts lookup for %q: %v", claims.Subject, err)
+				reqLogger(r).Printf("handleUserinfo: contacts lookup for %q: %v", claims.Subject, err)
 			}
 		}
 
@@ -476,7 +475,7 @@ func handleAdminOIDCClients(s *store.Store) http.HandlerFunc {
 				return
 			}
 			if err != nil {
-				log.Printf("handleAdminOIDCClients: delete %q: %v", path, err)
+				reqLogger(r).Printf("handleAdminOIDCClients: delete %q: %v", path, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
@@ -498,7 +497,7 @@ func handleAdminOIDCClients(s *store.Store) http.HandlerFunc {
 func listOIDCClients(s *store.Store, w http.ResponseWriter, r *http.Request) {
 	clients, err := s.ListOIDCClients()
 	if err != nil {
-		log.Printf("listOIDCClients: %v", err)
+		reqLogger(r).Printf("listOIDCClients: %v", err)
 		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -540,7 +539,7 @@ func createOIDCClient(s *store.Store, w http.ResponseWriter, r *http.Request) {
 	// Generate a raw secret; only the hash is stored.
 	rawSecret, err := store.GenerateRawCode()
 	if err != nil {
-		log.Printf("createOIDCClient: generate secret: %v", err)
+		reqLogger(r).Printf("createOIDCClient: generate secret: %v", err)
 		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -552,7 +551,7 @@ func createOIDCClient(s *store.Store, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("createOIDCClient: create: %v", err)
+		reqLogger(r).Printf("createOIDCClient: create: %v", err)
 		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 		return
 	}

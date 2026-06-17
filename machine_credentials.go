@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -190,7 +189,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	// List machine_key credentials and look for a hash match.
 	creds, err := s.ListCredentialsByPrincipal(principal.ID)
 	if err != nil {
-		log.Printf("handleClientCredentialsGrant: list credentials for %s: %v", principal.ID, err)
+		reqLogger(r).Printf("handleClientCredentialsGrant: list credentials for %s: %v", principal.ID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -218,7 +217,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	// Collect active scopes for this principal in the current environment.
 	granted, err := s.GetActiveScopes(principal.ID, environment)
 	if err != nil {
-		log.Printf("handleClientCredentialsGrant: get scopes for %s: %v", principal.ID, err)
+		reqLogger(r).Printf("handleClientCredentialsGrant: get scopes for %s: %v", principal.ID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -242,7 +241,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	// Obtain the active signing key.
 	signingKey, err := s.GetOrCreateActiveSigningKey()
 	if err != nil {
-		log.Printf("handleClientCredentialsGrant: get signing key: %v", err)
+		reqLogger(r).Printf("handleClientCredentialsGrant: get signing key: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -250,7 +249,7 @@ func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w 
 	// Mint a short-lived session JWT — identical format to the human login path.
 	tokenStr, err := token.MintSession(principal, effective, signingKey, issuer, "l42.eu", 0)
 	if err != nil {
-		log.Printf("handleClientCredentialsGrant: mint session: %v", err)
+		reqLogger(r).Printf("handleClientCredentialsGrant: mint session: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
 	}
@@ -305,14 +304,14 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 		principal, err := s.GetPrincipalByExternalID(store.PrincipalClassAgent, req.AgentSlug)
 		if err != nil {
 			if !errors.Is(err, store.ErrNotFound) {
-				log.Printf("handleAdminMachineKeys: get principal %q: %v", req.AgentSlug, err)
+				reqLogger(r).Printf("handleAdminMachineKeys: get principal %q: %v", req.AgentSlug, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
 			// Principal doesn't exist — create it.
 			principal, err = s.CreatePrincipal(store.PrincipalClassAgent, req.AgentSlug)
 			if err != nil {
-				log.Printf("handleAdminMachineKeys: create principal %q: %v", req.AgentSlug, err)
+				reqLogger(r).Printf("handleAdminMachineKeys: create principal %q: %v", req.AgentSlug, err)
 				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 				return
 			}
@@ -325,7 +324,7 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 		secretHash := hashMachineKey(rawSecret)
 		if len(secretHash) != machineKeyHashLen {
 			// This would be a bug — SHA-256 always produces 32 bytes → 64 hex chars.
-			log.Printf("handleAdminMachineKeys: unexpected hash length %d", len(secretHash))
+			reqLogger(r).Printf("handleAdminMachineKeys: unexpected hash length %d", len(secretHash))
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -334,7 +333,7 @@ func handleAdminMachineKeys(s *store.Store) http.HandlerFunc {
 		label := fmt.Sprintf("machine_key:%s", req.AgentSlug)
 		cred, err := s.CreateCredential(principal.ID, store.CredentialTypeMachineKey, []byte(secretHash), label)
 		if err != nil {
-			log.Printf("handleAdminMachineKeys: create credential for %q: %v", req.AgentSlug, err)
+			reqLogger(r).Printf("handleAdminMachineKeys: create credential for %q: %v", req.AgentSlug, err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -384,7 +383,7 @@ func handleAdminMachineKeyByID(s *store.Store) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			log.Printf("revokeCredential: %v", err)
+			reqLogger(r).Printf("revokeCredential: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
