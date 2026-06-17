@@ -86,6 +86,28 @@ Every admin has lost their passkey, or grants were revoked into a corner. Break-
 
 ---
 
+## D. Credential store volume lost
+
+The `lucos_aithne_credential_store` volume holds the SQLite database. If the volume is
+destroyed (disk failure, accidental `docker volume rm`, etc.):
+
+1. **Restore from backup first.** The volume is backed up by `lucos_backups` (classified
+   `recreate_effort: considerable` in lucos_configy). Follow the standard volume restore
+   procedure for `lucos_aithne_credential_store`. After a successful restore, the service
+   restarts normally — all principals, passkeys, and grants are intact and no bootstrap
+   procedure is needed. Proceed no further.
+
+2. **If restore is not possible** (no usable backup, or backup pre-dates the passkey
+   enrolment): the database must be rebuilt from scratch. Treat this as a full
+   catastrophic recovery — proceed with section C. A fresh database has no principals, so
+   `BOOTSTRAP_ADMIN_CONTACT_ID` re-seeds the admin principal and grant at startup, exactly
+   as in the initial-setup case.
+
+   Note that re-enrolment registers a new passkey but does not restore grants for other
+   principals — those must be re-granted by the recovered admin after enrolment.
+
+---
+
 ## Fallback: direct DB invite insert (last resort, no subcommand available)
 
 Only if the `--bootstrap-invite` subcommand is not deployed and you cannot redeploy.
