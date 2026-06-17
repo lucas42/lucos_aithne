@@ -12,16 +12,16 @@
   <div class="card card--center">
     {{if eq .Reason "not_found"}}
     <h2>Invite not valid</h2>
-    <p>This invite link isn't valid. Contact lucas42 to get a new one.</p>
+    <p>This invite link isn't valid. Contact the administrator to request a new one.</p>
     {{else if eq .Reason "expired"}}
     <h2>Invite expired</h2>
-    <p>This invite has expired. Contact lucas42 to get a new one.</p>
+    <p>This invite has expired. Contact the administrator to request a new one.</p>
     {{else if eq .Reason "used"}}
     <h2>Invite already used</h2>
-    <p>This invite has already been used. If you need help signing in, contact lucas42.</p>
+    <p>This invite has already been used. If you need help signing in, contact the administrator.</p>
     {{else}}
     <h2>Invite not valid</h2>
-    <p>This invite link isn't valid. Contact lucas42 to get a new one.</p>
+    <p>This invite link isn't valid. Contact the administrator to request a new one.</p>
     {{end}}
     <a href="/auth/login">← Back to sign in</a>
   </div>
