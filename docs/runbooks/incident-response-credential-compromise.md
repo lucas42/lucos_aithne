@@ -134,11 +134,26 @@ However, the old key remains in the JWKS verification endpoint for **15 minutes*
 verification window), so any tokens already forged with the compromised key remain
 verifiable for up to ≤20 minutes. Nothing can be done about those within that window.
 
-### Step 2 — Rotate the SIGNING_KEK
+### Step 2 — Re-key the SIGNING_KEK
 
-See lucas42/lucos_aithne#151 for the full SIGNING_KEK re-keying procedure. The short
-form: update `SIGNING_KEK` in lucos_creds and redeploy. On startup, aithne re-encrypts
-all stored keys with the new KEK.
+> ⚠ **This step requires the `--rekey` subcommand from lucas42/lucos_aithne#151, which is
+> not yet shipped.** Do not attempt it until #151 has merged.
+
+The SIGNING_KEK is the AES-256-GCM key that wraps the EC signing private keys stored in
+SQLite. Simply updating `SIGNING_KEK` in lucos_creds and redeploying is **not safe** — on
+startup, aithne would attempt to decrypt the stored keys with the new KEK, fail (the keys
+are still wrapped with the old KEK), and crash.
+
+The correct sequence (once #151 is available):
+
+1. Generate a new KEK value.
+2. Run the `aithne --rekey <new-kek>` subcommand against the live database. This
+   re-wraps all stored signing keys from the old KEK to the new one **in place**, so the
+   database is consistent before any code is restarted.
+3. Update `SIGNING_KEK` in lucos_creds to the new value.
+4. Redeploy aithne. It now starts cleanly — keys decrypt with the new KEK.
+
+See lucas42/lucos_aithne#151 for the full procedure and the `--rekey` implementation.
 
 ### Step 3 — Audit for forged tokens
 
