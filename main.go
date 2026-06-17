@@ -341,6 +341,62 @@ func runBootstrapInvite() {
 	os.Exit(0)
 }
 
+// runRekey is the entrypoint for the --rekey subcommand.
+// It reads SIGNING_KEK (old) and NEW_SIGNING_KEK (new), opens the credential store,
+// re-encrypts all signing key BLOBs under the new KEK, prints a confirmation, and
+// exits 0. Exits non-zero on any error. The HTTP server is never started.
+//
+// The service MUST be stopped before running --rekey. A running service holds the
+// old KEK in memory; a concurrent RotateSigningKey() during re-keying would race
+// on the SQLite write. Stop the container first, then run:
+//
+//	docker run --rm \
+//	  -v lucos_aithne_credential_store:/data \
+//	  -e SIGNING_KEK=<old-value> \
+//	  -e NEW_SIGNING_KEK=<new-value> \
+//	  lucas42/lucos_aithne_web:latest --rekey
+//
+// After successful exit: update SIGNING_KEK in lucos_creds, then restart the service.
+func runRekey() {
+	oldKEKStr := os.Getenv("SIGNING_KEK")
+	newKEKStr := os.Getenv("NEW_SIGNING_KEK")
+
+	if len(oldKEKStr) != 32 {
+		fmt.Fprintf(os.Stderr, "rekey: SIGNING_KEK must be 32 bytes, got %d\n", len(oldKEKStr))
+		os.Exit(1)
+	}
+	if len(newKEKStr) != 32 {
+		fmt.Fprintf(os.Stderr, "rekey: NEW_SIGNING_KEK must be 32 bytes, got %d\n", len(newKEKStr))
+		os.Exit(1)
+	}
+
+	var oldKEK, newKEK [32]byte
+	copy(oldKEK[:], oldKEKStr)
+	copy(newKEK[:], newKEKStr)
+
+	if oldKEK == newKEK {
+		fmt.Fprintln(os.Stderr, "rekey: SIGNING_KEK and NEW_SIGNING_KEK are identical — nothing to do")
+		os.Exit(0)
+	}
+
+	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
+	s, err := store.Open(dbPath, oldKEK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rekey: open store at %q: %v\n", dbPath, err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	n, err := s.RekeySigningKeys(newKEK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rekey: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then restart the service.\n", n)
+	os.Exit(0)
+}
+
 // --- Admin HTTP handlers ---
 
 // credentialJSON is the JSON representation of a credential returned by admin endpoints.
@@ -1083,6 +1139,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--bootstrap-invite" {
 		runBootstrapInvite()
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--rekey" {
+		runRekey()
 	}
 
 	system := getEnvRequired("SYSTEM")

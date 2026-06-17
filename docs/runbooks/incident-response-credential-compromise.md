@@ -135,24 +135,41 @@ verifiable for up to ≤35 minutes. Nothing can be done about those within that 
 
 ### Step 2 — Re-key the SIGNING_KEK
 
-> ⚠ **This step requires the `--rekey` subcommand from lucas42/lucos_aithne#151, which is
-> not yet shipped.** Do not attempt it until #151 has merged.
-
 The SIGNING_KEK is the AES-256-GCM key that wraps the EC signing private keys stored in
 SQLite. Simply updating `SIGNING_KEK` in lucos_creds and redeploying is **not safe** — on
 startup, aithne would attempt to decrypt the stored keys with the new KEK, fail (the keys
 are still wrapped with the old KEK), and crash.
 
-The correct sequence (once #151 is available):
+The `--rekey` subcommand handles this safely: it re-wraps all stored signing keys in place,
+so the database is consistent with the new KEK before the service is restarted.
 
-1. Generate a new KEK value.
-2. Run the `aithne --rekey <new-kek>` subcommand against the live database. This
-   re-wraps all stored signing keys from the old KEK to the new one **in place**, so the
-   database is consistent before any code is restarted.
-3. Update `SIGNING_KEK` in lucos_creds to the new value.
-4. Redeploy aithne. It now starts cleanly — keys decrypt with the new KEK.
+**Stop the service before running `--rekey`.** A running container holds the old KEK in
+memory; a concurrent key rotation during re-keying would race on the SQLite write.
 
-See lucas42/lucos_aithne#151 for the full procedure and the `--rekey` implementation.
+```sh
+# 1. Generate a new 32-byte KEK.
+NEW_KEK=$(openssl rand -base64 32 | head -c 32)
+
+# 2. Stop the aithne container.
+docker stop lucos_aithne_web
+
+# 3. Run --rekey against the live database volume.
+docker run --rm \
+  -v lucos_aithne_credential_store:/data \
+  -e SIGNING_KEK=<old-kek-value> \
+  -e NEW_SIGNING_KEK="$NEW_KEK" \
+  lucas42/lucos_aithne_web:latest --rekey
+
+# 4. If --rekey exits 0: update SIGNING_KEK in lucos_creds to $NEW_KEK.
+#    (Only lucas42 can write to the production environment.)
+
+# 5. Restart the service — it picks up the new KEK and starts cleanly.
+docker start lucos_aithne_web
+```
+
+`--rekey` is atomic: if any key cannot be decrypted with the old KEK, it aborts before
+writing anything. If it exits 0, all signing key BLOBs have been re-wrapped and validated
+under the new KEK.
 
 ### Step 3 — Audit for forged tokens
 
@@ -186,4 +203,4 @@ difference is in what stops new tokens from being minted.
 - [bootstrap-first-admin.md](bootstrap-first-admin.md) — break-glass for total admin
   lockout (relevant if the compromise also locked out all admins).
 - lucas42/lucos_aithne#162 — the issue that identified this runbook gap.
-- lucas42/lucos_aithne#151 — SIGNING_KEK re-keying procedure (scenario B follow-up).
+- lucas42/lucos_aithne#151 — the issue that introduced the `--rekey` subcommand.
