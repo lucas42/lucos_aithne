@@ -91,6 +91,8 @@ drift across the estate.
 
 Because tokens are short-lived and stateless, revocation is eventually-consistent: a
 revoked grant persists in already-issued tokens until those tokens expire (≤15 min).
+For the operator response when a credential is suspected compromised, see the
+[incident response runbook](runbooks/incident-response-credential-compromise.md).
 
 ## Obtaining the token
 
