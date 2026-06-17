@@ -87,7 +87,7 @@ func writeTokenError(w http.ResponseWriter, status int, errCode, description str
 // It dispatches between the supported grant types:
 //   - client_credentials (RFC 6749 §4.4): agent/machine principals via machine_key
 //   - authorization_code (RFC 6749 §4.1): human principals via OIDC authorization flow
-func handleOAuth2Token(s *store.Store, issuer, environment string) http.HandlerFunc {
+func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -102,7 +102,7 @@ func handleOAuth2Token(s *store.Store, issuer, environment string) http.HandlerF
 		grantType := r.FormValue("grant_type")
 		switch grantType {
 		case "client_credentials":
-			handleClientCredentialsGrant(s, issuer, environment, w, r)
+			handleClientCredentialsGrant(s, issuer, environment, tokenLimiter, w, r)
 		case "authorization_code":
 			handleAuthCodeGrant(s, issuer, environment, w, r)
 		default:
@@ -115,7 +115,7 @@ func handleOAuth2Token(s *store.Store, issuer, environment string) http.HandlerF
 // handleClientCredentials wraps handleClientCredentialsGrant as an http.HandlerFunc,
 // enforcing POST method and grant_type=client_credentials before delegating.
 // Retained for use in tests that exercise the client_credentials path directly.
-func handleClientCredentials(s *store.Store, issuer, environment string) http.HandlerFunc {
+func handleClientCredentials(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -131,7 +131,7 @@ func handleClientCredentials(s *store.Store, issuer, environment string) http.Ha
 				fmt.Sprintf("unsupported grant_type %q; only client_credentials is supported", grantType))
 			return
 		}
-		handleClientCredentialsGrant(s, issuer, environment, w, r)
+		handleClientCredentialsGrant(s, issuer, environment, tokenLimiter, w, r)
 	}
 }
 
@@ -165,12 +165,29 @@ func toSet(ss []string) map[string]bool {
 
 // handleClientCredentialsGrant implements the client_credentials grant.
 // Called after grant_type has been confirmed; r.ParseForm() must have run.
-func handleClientCredentialsGrant(s *store.Store, issuer, environment string, w http.ResponseWriter, r *http.Request) {
+func handleClientCredentialsGrant(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter, w http.ResponseWriter, r *http.Request) {
 	clientID := r.FormValue("client_id")
 	clientSecret := r.FormValue("client_secret")
 	if clientID == "" || clientSecret == "" {
 		writeTokenError(w, http.StatusUnauthorized, "invalid_client",
 			"client_id and client_secret are required")
+		return
+	}
+
+	// Per-client-ID rate limiting applied before any credential lookup, so
+	// repeated failures from the same client don't trigger full DB work.
+	// Fall back to IP when client_id is absent (already caught above, but guard
+	// here in case this function is called via a future path without that check).
+	limitKey := clientID
+	if limitKey == "" {
+		limitKey = clientIP(r)
+	}
+	if ok, count := tokenLimiter.Allow(limitKey); !ok {
+		reqLogger(r).Printf("rate limit exceeded: %s client_id=%q count=%d window=%s", r.URL.Path, clientID, count, tokenEndpointWindow)
+		retryAfter := fmt.Sprintf("%d", int(tokenEndpointWindow.Seconds()))
+		w.Header().Set("Retry-After", retryAfter)
+		writeTokenError(w, http.StatusTooManyRequests, "rate_limited",
+			"too many authentication attempts for this client — retry after "+retryAfter+" seconds")
 		return
 	}
 

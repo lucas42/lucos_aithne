@@ -1254,6 +1254,31 @@ func main() {
 	}
 	cs := newCeremonyStore()
 
+	// Rate limiters for authentication endpoints.
+	tokenLimiter := newKeyedLimiter(tokenEndpointLimit, tokenEndpointWindow)
+	ceremonyLimiter := newKeyedLimiter(ceremonyBeginLimit, ceremonyBeginWindow)
+
+	// Background goroutine: sweep expired ceremony sessions on a timer.
+	// This bounds memory independently of request volume — previously only the
+	// opportunistic cleanup in put/putEnrol ran, which required a new request.
+	go func() {
+		ticker := time.NewTicker(challengeTTL)
+		defer ticker.Stop()
+		for range ticker.C {
+			cs.sweepExpired()
+		}
+	}()
+
+	// Background goroutine: sweep stale rate-limiter entries on a timer.
+	go func() {
+		ticker := time.NewTicker(rateLimiterCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			tokenLimiter.sweepExpired()
+			ceremonyLimiter.sweepExpired()
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_info", handleInfo(system, s))
 	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
@@ -1281,7 +1306,7 @@ func main() {
 	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
 
 	// WebAuthn login ceremony endpoints.
-	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs))
+	mux.HandleFunc("/auth/login/begin", handleLoginBegin(s, wa, cs, ceremonyLimiter))
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
 
 	// Logout endpoint — clears the session cookie and redirects to /.
@@ -1289,7 +1314,7 @@ func main() {
 
 	// OAuth2/OIDC endpoints (ADR §1, §5).
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))
-	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment, tokenLimiter))
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
 	// Admin enrolment surface (all gated on aithne:admin scope).
@@ -1308,7 +1333,7 @@ func main() {
 
 	// Invitee enrolment flow — invite-gated, no auth required.
 	mux.HandleFunc("/enrol", handleEnrolPage(s, contacts))
-	mux.HandleFunc("/enrol/begin", handleEnrolBegin(s, wa, cs, contacts))
+	mux.HandleFunc("/enrol/begin", handleEnrolBegin(s, wa, cs, contacts, ceremonyLimiter))
 	mux.HandleFunc("/enrol/finish", handleEnrolFinish(s, wa, cs))
 
 	addr := fmt.Sprintf(":%s", port)
