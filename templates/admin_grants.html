@@ -171,45 +171,91 @@
       window.location.href = u.toString();
     }
 
-    // ── Revoke ─────────────────────────────────────────────────────────────────
-    document.querySelectorAll('.revoke-btn').forEach(function(btn) {
-      btn.addEventListener('click', async function() {
-        const grantId = this.dataset.grantId;
-        clearError();
-        this.setAttribute('aria-disabled', 'true');
-        const origLabel = this.textContent;
-        this.textContent = 'Revoking…';
-        try {
-          const resp = await fetch('/admin/grants/' + encodeURIComponent(grantId), {
-            method: 'DELETE',
-            headers: { 'Authorization': 'Bearer ' + sessionToken },
-          });
-          if (!resp.ok) {
-            const text = await resp.text();
-            if (resp.status === 401 || resp.status === 403) {
-              showError('Access denied. Your session may have expired — sign out and back in.');
-            } else if (resp.status === 409) {
-              showError('This grant has already been revoked.');
-            } else {
-              showError('Could not revoke: ' + text.trim());
+    // ── Revoke (inline confirm — contact loses access immediately) ─────────────
+    //
+    // Event delegation on grantsBody means re-rendered buttons (after Cancel)
+    // are picked up automatically — no listener re-attachment needed.
+    const grantsBody = document.getElementById('grantsBody');
+    if (grantsBody) {
+      grantsBody.addEventListener('click', async function(e) {
+        const btn = e.target.closest('button[data-grant-id]');
+        if (!btn) return;
+
+        const grantId = btn.dataset.grantId;
+        const cell = btn.closest('td');
+        if (!cell) return;
+
+        // Preserve original button so Cancel can restore it exactly.
+        const origBtn = btn.cloneNode(true);
+
+        // Replace the Revoke button with an inline confirm prompt.
+        cell.innerHTML = '';
+        const prompt = document.createElement('div');
+        prompt.className = 'confirm-row';
+        prompt.setAttribute('role', 'group');
+        prompt.setAttribute('aria-label', 'Confirm: revoke this grant');
+
+        const msg = document.createElement('p');
+        msg.textContent = 'The contact loses access to this scope immediately.';
+        prompt.appendChild(msg);
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'confirm-btn';
+        confirmBtn.textContent = 'Confirm revoke';
+        prompt.appendChild(confirmBtn);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'cancel-btn';
+        cancelBtn.textContent = 'Cancel';
+        prompt.appendChild(cancelBtn);
+
+        cell.appendChild(prompt);
+        confirmBtn.focus();
+
+        // Cancel: restore the original Revoke button.
+        // Event delegation picks it back up automatically.
+        cancelBtn.addEventListener('click', function() {
+          cell.innerHTML = '';
+          cell.appendChild(origBtn);
+        });
+
+        // Confirm: DELETE /admin/grants/{id}.
+        confirmBtn.addEventListener('click', async function() {
+          clearError();
+          confirmBtn.setAttribute('aria-disabled', 'true');
+          confirmBtn.textContent = 'Revoking…';
+          cancelBtn.setAttribute('aria-disabled', 'true');
+          try {
+            const resp = await fetch('/admin/grants/' + encodeURIComponent(grantId), {
+              method: 'DELETE',
+              headers: { 'Authorization': 'Bearer ' + sessionToken },
+            });
+            if (!resp.ok) {
+              const text = await resp.text();
+              cell.innerHTML = '';
+              cell.appendChild(origBtn);
+              if (resp.status === 401 || resp.status === 403) {
+                showError('Access denied. Your session may have expired — sign out and back in.');
+              } else if (resp.status === 409) {
+                showError('This grant has already been revoked.');
+              } else {
+                showError('Could not revoke: ' + text.trim());
+              }
+              return;
             }
-            this.removeAttribute('aria-disabled');
-            this.textContent = origLabel;
-            return;
-          }
-          // Swap button for a revoked badge in-place — keeps the row visible
-          // and consistent with what the page shows on a fresh load.
-          const cell = this.closest('td');
-          if (cell) {
+            // Swap confirm prompt for a revoked badge in-place — keeps the row
+            // visible and consistent with what the page shows on a fresh load.
             cell.innerHTML = '<span class="status-revoked">Revoked</span>';
+          } catch (_) {
+            cell.innerHTML = '';
+            cell.appendChild(origBtn);
+            showError('Something went wrong. Try again.');
           }
-        } catch (_) {
-          showError('Something went wrong. Try again.');
-          this.removeAttribute('aria-disabled');
-          this.textContent = origLabel;
-        }
+        });
       });
-    });
+    }
 
     // ── Grant ──────────────────────────────────────────────────────────────────
     const grantForm = document.getElementById('grantForm');
