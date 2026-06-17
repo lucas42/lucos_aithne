@@ -29,9 +29,20 @@ import (
 // persists until expiry), so the TTL bounds the revocation window.
 const DefaultSessionTTL = 15 * time.Minute
 
-// VerificationWindow is the minimum window for ListVerificationKeys:
-// it must be >= DefaultSessionTTL so all tokens in circulation can be verified.
-const VerificationWindow = DefaultSessionTTL
+// VerificationWindow is the minimum window for ListVerificationKeys: it governs
+// how long a retired signing key stays published in the JWKS after rotation.
+//
+// Must satisfy: VerificationWindow >= DefaultSessionTTL + max-consumer-JWKS-cache-TTL + clock-drift.
+//
+//   - DefaultSessionTTL = 15 min  (token lifetime)
+//   - Consumer JWKS cache TTL = 5 min  (recommended in local-verification-contract.md)
+//   - Clock drift + headroom ≈ 10 min
+//   ──────────────────────────────────────────
+//   Minimum ≈ 30 min
+//
+// 30 min flat. If DefaultSessionTTL or the recommended consumer cache TTL changes,
+// update this constant to keep the relationship satisfied.
+const VerificationWindow = 30 * time.Minute
 
 // ClaimPrincipalClass is the custom JWT claim name for the principal class.
 // Values: "human" | "agent".
