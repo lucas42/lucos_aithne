@@ -1,7 +1,8 @@
 # ADR-0003: Human session continuity — long-lived IdP session with navbar-driven silent re-mint
 
 **Date:** 2026-06-18
-**Status:** Proposed (awaiting lucas42 sign-off on this PR)
+**Status:** Accepted
+**Accepted:** 2026-06-22 — approved by lucas42 (PR #182)
 **Supplements:** [ADR-0001 §3 (the single 15-minute session JWT)](0001-foundational-design.md) — adds the human session-continuity layer it left open.
 **Issue:** [lucas42/lucos_aithne#147](https://github.com/lucas42/lucos_aithne/issues/147)
 
