@@ -38,33 +38,42 @@ rejected with HTTP 401.
 
 ### Exempt paths — `/_info` MUST NOT require auth
 
-Before any token handling, the consumer's auth middleware MUST exempt the `/_info`
-endpoint. `/_info` is the unauthenticated monitoring endpoint defined by the
-estate-wide info-endpoint spec; `lucos_monitoring` polls it without a token on a
-~30-second heartbeat. A consumer that applies its auth middleware to `/_info` returns
-401 to the monitor and produces a false "service down" alert on every cycle.
+The `/_info` endpoint MUST be reachable without a session token. It is the
+unauthenticated monitoring endpoint defined by the estate-wide info-endpoint spec;
+`lucos_monitoring` polls it without any credential on a ~60-second heartbeat. If a
+consumer applies its auth to `/_info`, the unauthenticated poll fails the auth check
+(whatever the exact response) and the monitor records a failing check — a false
+"service down" alert — on every cycle.
 
 This failure is invisible to unit tests — auth-middleware tests rarely exercise
 `/_info` — so it MUST be caught by convention, not testing.
 
-**Canonical pattern:** test `request.path == "/_info"` at the very top of the middleware
-dispatch and short-circuit to the handler, **before** any token extraction or
-verification. Putting the check first (rather than relying on route-registration order)
-makes the exemption explicit and framework-independent.
+**Preferred pattern — register unauthenticated routes before the auth middleware.**
+Where the framework lets you order route registration (e.g. Express), declare `/_info`
+(and any other deliberately-public route, such as static resources) **before** the auth
+middleware is added to the chain. The middleware then never sees those requests and
+needs no knowledge of which paths are public.
 
 ```js
-// Node — top of the auth middleware, before reading the token
-if (req.path === '/_info') return next();
+// Node (Express) — lucos_notes src/server/index.js
+app.get('/_info', (req, res) => { /* … serve the info payload … */ });
+app.use(express.static('./resources'));           // other public routes, also pre-auth
+app.use((req, res, next) => app.auth(req, res, next));  // auth applies to everything below
 ```
 
-```python
-# Python — top of the middleware dispatch, before token extraction
-if request.path == "/_info":
-    return await call_next(request)
-```
+This is preferred over an in-middleware path check (`if (req.path === '/_info') …`)
+because the latter makes the middleware duplicate the app's routing knowledge: every
+time the set of public paths changes, the middleware allow-list must change in lock-step,
+and forgetting to is a security hazard (a route silently left unauthenticated, or a
+public route that starts demanding auth). Registration order keeps the "is this public?"
+decision in one place — the route table.
 
-The same applies to any other endpoint a consumer publishes as deliberately
-unauthenticated (e.g. a static health probe). See the
+Where the framework wraps the whole app in a single middleware with no per-route
+exemption (e.g. ASGI middleware in Python), the fallback is an explicit `request.path`
+check at the very top of the middleware, **before** any token extraction. Keep that
+allow-list minimal and in sync with the routes, given the hazard above.
+
+See the
 [info-endpoint spec](https://github.com/lucas42/lucos/blob/main/docs/info-endpoint-spec.md)
 for what `/_info` must serve.
 
