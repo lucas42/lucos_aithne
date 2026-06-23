@@ -5000,24 +5000,21 @@ func TestHandleReMint_WrongMethod(t *testing.T) {
 }
 
 func TestHandleReMint_CORS_AllowedOrigin(t *testing.T) {
+	// Any *.l42.eu origin is allowed without OIDC registration — glob check.
 	s, _, rawToken := setupReMintStore(t)
-	// Register an OIDC client with origin https://photos.test
-	if _, err := s.CreateOIDCClient("photos", "hash", "Photos", []string{"https://photos.test/callback"}); err != nil {
-		t.Fatalf("CreateOIDCClient: %v", err)
-	}
 
 	handler := handleReMint(s, testIssuer, "development", testIssuer)
 	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
 	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
-	req.Header.Set("Origin", "https://photos.test")
+	req.Header.Set("Origin", "https://arachne.l42.eu")
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://photos.test" {
-		t.Errorf("ACAO: got %q, want %q", got, "https://photos.test")
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://arachne.l42.eu" {
+		t.Errorf("ACAO: got %q, want %q", got, "https://arachne.l42.eu")
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Errorf("ACAC: got %q, want 'true'", got)
@@ -5040,14 +5037,12 @@ func TestHandleReMint_CORS_DisallowedOrigin(t *testing.T) {
 }
 
 func TestHandleReMint_CORS_Preflight(t *testing.T) {
+	// Preflight for a *.l42.eu origin — no OIDC registration needed.
 	s, _, _ := setupReMintStore(t)
-	if _, err := s.CreateOIDCClient("app", "hash", "App", []string{"https://app.test/cb"}); err != nil {
-		t.Fatalf("CreateOIDCClient: %v", err)
-	}
 
 	handler := handleReMint(s, testIssuer, "development", testIssuer)
 	req := httptest.NewRequest(http.MethodOptions, "/auth/remint", nil)
-	req.Header.Set("Origin", "https://app.test")
+	req.Header.Set("Origin", "https://photos.l42.eu")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	rr := httptest.NewRecorder()
 	handler(rr, req)
@@ -5055,8 +5050,8 @@ func TestHandleReMint_CORS_Preflight(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Errorf("expected 204 for preflight, got %d", rr.Code)
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.test" {
-		t.Errorf("ACAO: got %q, want %q", got, "https://app.test")
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://photos.l42.eu" {
+		t.Errorf("ACAO: got %q, want %q", got, "https://photos.l42.eu")
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Methods"); got == "" {
 		t.Error("expected Access-Control-Allow-Methods header on preflight")

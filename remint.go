@@ -25,22 +25,39 @@ package main
 // also adding a CSRF token. The endpoint must remain "re-issue existing session only"
 // for this reasoning to hold.
 //
-// # CORS allow-list
+// # CORS allow-list — *.l42.eu origin glob (ADR-0003 §2, amended 2026-06-23)
 //
-// The CORS allow-list is derived from the registered OIDC clients' redirect_uris
-// (origin portion only). Any origin whose redirect_uri is registered in aithne is
-// considered a consumer and is allowed to trigger cross-origin re-mints. The
-// allow-list is an explicit membership check: a compromised *.l42.eu subdomain that
-// is NOT registered as an OIDC client cannot trigger re-mints.
+// Any HTTPS origin matching the *.l42.eu suffix (e.g. https://arachne.l42.eu,
+// https://photos.l42.eu) is allowed to make credentialed cross-site fetch() calls
+// to this endpoint. The matched origin is echoed in Access-Control-Allow-Origin
+// (required by the CORS spec when credentials are involved; a static "*" is
+// spec-invalid with credentials per WHATWG Fetch §3.2.5).
+//
+// This glob is safe ONLY because the endpoint is "harmless-if-forged" (see CSRF
+// section above). If any future change adds a readable response body, a side-effect
+// beyond re-issuing the caller's own session, or any capability the attacker could
+// extract across the CORS boundary, the allow-list MUST be tightened BEFORE that
+// change ships. Do not widen or preserve the glob on a changed endpoint design
+// without a fresh threat-model review.
+//
+// Non-l42.eu cross-origin requests are still 403'd. Same-origin requests (no
+// Origin header, or Origin == APP_ORIGIN) bypass the check entirely.
 
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 
 	"lucos_aithne/store"
 	"lucos_aithne/token"
 )
+
+// l42euOriginRe matches any https://*.l42.eu origin (scheme + valid hostname ending in .l42.eu).
+// The regex requires "https://" and at least one label before ".l42.eu"; labels may contain
+// ASCII letters, digits, and hyphens (RFC 1123); uppercase not expected (origins are lowercased
+// by browsers) but the regex is case-sensitive for simplicity — production origins are lowercase.
+var l42euOriginRe = regexp.MustCompile(`^https://[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*\.l42\.eu$`)
 
 // handleReMint returns an http.HandlerFunc for POST /auth/remint.
 // appOrigin is APP_ORIGIN (used for same-origin CORS bypass).
@@ -49,7 +66,7 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 		// Handle CORS preflight (OPTIONS) before method check so browsers can
 		// complete the preflight without a 405.
 		if r.Method == http.MethodOptions {
-			handleReMintPreflight(w, r, s)
+			handleReMintPreflight(w, r)
 			return
 		}
 
@@ -60,8 +77,8 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 
 		// Apply CORS headers for the actual request (cross-origin fetch).
 		// setCORSHeaders returns false and writes 403 if the Origin is present but
-		// not in the allow-list — in that case we must not proceed.
-		if !setCORSHeaders(w, r, s, appOrigin) {
+		// not matched by the *.l42.eu glob — in that case we must not proceed.
+		if !setCORSHeaders(w, r, appOrigin) {
 			return
 		}
 
@@ -173,9 +190,9 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 // handleReMintPreflight handles the OPTIONS preflight request for /auth/remint.
 // The browser sends OPTIONS before the credentialed cross-origin POST;
 // we must respond with the CORS allow headers for the browser to proceed.
-func handleReMintPreflight(w http.ResponseWriter, r *http.Request, s *store.Store) {
+func handleReMintPreflight(w http.ResponseWriter, r *http.Request) {
 	appOrigin := "" // preflight doesn't need app-origin bypass
-	if !setCORSHeaders(w, r, s, appOrigin) {
+	if !setCORSHeaders(w, r, appOrigin) {
 		return // setCORSHeaders already wrote 403
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -184,38 +201,33 @@ func handleReMintPreflight(w http.ResponseWriter, r *http.Request, s *store.Stor
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// setCORSHeaders inspects the Origin request header and, if the origin is in the
-// registered allow-list, sets the CORS response headers and returns true.
+// setCORSHeaders inspects the Origin request header and, if the origin matches
+// the *.l42.eu glob, sets the CORS response headers and returns true.
 // If Origin is absent or equals appOrigin (same-origin), no headers are set and
 // true is returned (non-cross-origin requests proceed without CORS headers).
-// If Origin is present but not in the allow-list, 403 is written and false returned.
-func setCORSHeaders(w http.ResponseWriter, r *http.Request, s *store.Store, appOrigin string) bool {
+// If Origin is present but does not match *.l42.eu, 403 is written and false returned.
+//
+// Safe to use as a glob because /auth/remint is harmless-if-forged — see the
+// package-level CORS comment above for the threat-model rationale and the
+// explicit warning about future footguns.
+func setCORSHeaders(w http.ResponseWriter, r *http.Request, appOrigin string) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" || origin == appOrigin {
 		// No Origin header (non-browser / same-origin) — proceed without CORS headers.
 		return true
 	}
 
-	allowedOrigins, err := s.ListAllowedCORSOrigins()
-	if err != nil {
-		reqLogger(r).Printf("setCORSHeaders: list allowed origins: %v", err)
-		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-		return false
+	if l42euOriginRe.MatchString(origin) {
+		// Per-request origin echo required by the CORS spec when using
+		// Access-Control-Allow-Credentials: true. A static "*" is spec-invalid
+		// with credentials (WHATWG Fetch §3.2.5).
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Vary", "Origin")
+		return true
 	}
 
-	for _, allowed := range allowedOrigins {
-		if origin == allowed {
-			// Per-request origin echo required by the CORS spec when using
-			// Access-Control-Allow-Credentials: true. A static "*" is spec-invalid
-			// with credentials (WHATWG Fetch §3.2.5).
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Vary", "Origin")
-			return true
-		}
-	}
-
-	// Origin is not in the allow-list — reject the cross-origin request.
+	// Origin does not match *.l42.eu — reject the cross-origin request.
 	http.Error(w, "403 Forbidden — origin not allowed", http.StatusForbidden)
 	return false
 }
