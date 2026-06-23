@@ -4302,10 +4302,16 @@ func TestHomePage_SetsCSP(t *testing.T) {
 // --- Logout tests ---
 
 func TestLogout_ClearsCookieAndRedirects(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Origin", testIssuer)
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer, "production")(rr, req)
+	handleLogout(s, testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("expected HTTP 303, got %d", rr.Code)
@@ -4330,11 +4336,58 @@ func TestLogout_ClearsCookieAndRedirects(t *testing.T) {
 	}
 }
 
+func TestLogout_RevokesIDPSessionServerSide(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	// Create a principal and an IdP session so we have a real token to revoke.
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "contact-logout-test")
+	if err != nil {
+		t.Fatalf("create principal: %v", err)
+	}
+	rawToken, _, err := s.CreateIDPSession(p.ID)
+	if err != nil {
+		t.Fatalf("create idp session: %v", err)
+	}
+
+	// Confirm the session is live before logout.
+	sess, err := s.GetIDPSessionByToken(rawToken)
+	if err != nil || sess == nil {
+		t.Fatalf("expected live session before logout; err=%v", err)
+	}
+
+	// Perform logout with the IdP session cookie present.
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Origin", testIssuer)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	rr := httptest.NewRecorder()
+	handleLogout(s, testIssuer, "production")(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected HTTP 303, got %d", rr.Code)
+	}
+
+	// The server-side record must now be revoked.
+	_, err = s.GetIDPSessionByToken(rawToken)
+	if !errors.Is(err, store.ErrIDPSessionRevoked) {
+		t.Errorf("expected ErrIDPSessionRevoked after logout, got %v", err)
+	}
+}
+
 func TestLogout_WrongOrigin_Forbidden(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Origin", "https://evil.example.com")
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer, "production")(rr, req)
+	handleLogout(s, testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected HTTP 403, got %d", rr.Code)
@@ -4342,10 +4395,16 @@ func TestLogout_WrongOrigin_Forbidden(t *testing.T) {
 }
 
 func TestLogout_MissingOrigin_Forbidden(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	// No Origin header set.
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer, "production")(rr, req)
+	handleLogout(s, testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected HTTP 403, got %d", rr.Code)
@@ -4353,9 +4412,15 @@ func TestLogout_MissingOrigin_Forbidden(t *testing.T) {
 }
 
 func TestLogout_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	req := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
 	rr := httptest.NewRecorder()
-	handleLogout(testIssuer, "production")(rr, req)
+	handleLogout(s, testIssuer, "production")(rr, req)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected HTTP 405, got %d", rr.Code)

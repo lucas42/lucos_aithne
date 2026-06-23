@@ -1113,12 +1113,13 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 }
 
 // handleLogout serves POST /auth/logout.
-// It validates the Origin header as a CSRF guard, clears both the aithne_session
-// cookie and the aithne_idp_session cookie, and redirects to /.
+// It validates the Origin header as a CSRF guard, revokes the server-side IdP
+// session record (so a captured cookie cannot be exploited after logout), clears
+// both the aithne_session and aithne_idp_session cookies, and redirects to /.
 // See lucos-security analysis on lucos_aithne#87 for the threat-model rationale.
 // The Origin check is always required regardless of SameSite mode, since in
 // development SameSite=Lax applies and in production SameSite=None applies.
-func handleLogout(appOrigin, environment string) http.HandlerFunc {
+func handleLogout(s *store.Store, appOrigin, environment string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -1131,6 +1132,15 @@ func handleLogout(appOrigin, environment string) http.HandlerFunc {
 		if r.Header.Get("Origin") != appOrigin {
 			http.Error(w, "403 Forbidden — invalid origin", http.StatusForbidden)
 			return
+		}
+		// Revoke the server-side IdP session record so the token is unusable
+		// even if the attacker captured it before the browser dropped the cookie.
+		// Non-fatal: if the cookie is absent or revocation fails, continue —
+		// the primary security action is clearing the cookies client-side.
+		if cookie, err := r.Cookie(token.IdPSessionCookieName); err == nil {
+			if revokeErr := s.RevokeIDPSessionByToken(cookie.Value); revokeErr != nil {
+				reqLogger(r).Printf("handleLogout: revoke idp session: %v (non-fatal)", revokeErr)
+			}
 		}
 		// Clear both session cookies. Attributes must match those used in the
 		// corresponding Set* functions so the browser treats them as the same cookies.
@@ -1352,7 +1362,7 @@ func main() {
 	mux.HandleFunc("/auth/login/finish", handleLoginFinish(s, wa, cs, issuer, environment))
 
 	// Logout endpoint — clears the session cookie and redirects to /.
-	mux.HandleFunc("/auth/logout", handleLogout(issuer, environment))
+	mux.HandleFunc("/auth/logout", handleLogout(s, issuer, environment))
 
 	// Silent re-mint endpoint (ADR-0003 §2) — given a valid IdP-session cookie,
 	// re-issues a fresh 15-minute aithne_session without a WebAuthn ceremony.

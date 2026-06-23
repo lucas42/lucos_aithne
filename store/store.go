@@ -810,6 +810,25 @@ func (s *Store) RevokeIDPSessionsForPrincipal(principalID string) (int, error) {
 	return int(n), nil
 }
 
+// RevokeIDPSessionByToken marks the single IdP session identified by rawToken as
+// revoked, effective immediately. This is called by handleLogout to invalidate the
+// server-side record when the user explicitly logs out, so the token cannot be
+// exploited even if captured before the browser discarded the cookie.
+// Returns without error if the token is not found or already revoked.
+func (s *Store) RevokeIDPSessionByToken(rawToken string) error {
+	hash := HashToken(rawToken)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`UPDATE idp_sessions SET revoked_at = ?
+		 WHERE token_hash = ? AND revoked_at IS NULL`,
+		now, hash,
+	)
+	if err != nil {
+		return fmt.Errorf("store: revoke idp session by token: %w", err)
+	}
+	return nil
+}
+
 // ListAllowedCORSOrigins returns the set of HTTPS origins that are permitted to
 // make credentialed cross-site fetch() calls to the re-mint endpoint (ADR-0003 §2).
 // Origins are derived from the registered OIDC clients' redirect_uris: any origin
