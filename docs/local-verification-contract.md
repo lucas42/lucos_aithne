@@ -230,6 +230,7 @@ grant_type=client_credentials&client_id=<agent-slug>&client_secret=<secret>&scop
 | `unsupported_grant_type` | 400 | `grant_type` was missing or not a supported grant (`client_credentials`). |
 | `invalid_client` | 401 | Unknown `client_id`, or wrong/revoked `client_secret`. (The two are deliberately indistinguishable — no information leak.) |
 | `invalid_scope` | 400 | A requested scope is not granted to this principal in the current environment. |
+| `rate_limited` | 429 | Rate limit exceeded for this `client_id` (the limiter is applied per-`client_id`, before any credential lookup). Back off for the number of seconds in the `Retry-After` response header before retrying. |
 | `server_error` | 500 | aithne-side failure. |
 
 #### Provisioning the `client_secret`
@@ -256,7 +257,11 @@ grant. Recommended pattern:
 2. **Proactively refresh** shortly before expiry (e.g. at ~12 min) so no request races the
    boundary; **and/or** treat a `401` from a downstream service as a signal to re-mint once
    and retry the call.
-3. Never persist the token to disk — re-minting is cheap and bounds the blast radius of a
+3. **Respect `429 rate_limited`.** The token endpoint is rate-limited per `client_id`. If a
+   mint returns `429`, do not hot-loop — back off for the `Retry-After` interval before
+   retrying. Proactive refresh (step 2) keeps you clear of the limit in normal operation;
+   a `429` usually means a retry storm or a misconfigured credential.
+4. Never persist the token to disk — re-minting is cheap and bounds the blast radius of a
    leak to the TTL.
 
 ## Key rotation
