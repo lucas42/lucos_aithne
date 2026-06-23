@@ -1113,8 +1113,8 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 }
 
 // handleLogout serves POST /auth/logout.
-// It validates the Origin header as a CSRF guard, clears the aithne_session
-// cookie, and redirects to /.
+// It validates the Origin header as a CSRF guard, clears both the aithne_session
+// cookie and the aithne_idp_session cookie, and redirects to /.
 // See lucos-security analysis on lucos_aithne#87 for the threat-model rationale.
 // The Origin check is always required regardless of SameSite mode, since in
 // development SameSite=Lax applies and in production SameSite=None applies.
@@ -1132,9 +1132,10 @@ func handleLogout(appOrigin, environment string) http.HandlerFunc {
 			http.Error(w, "403 Forbidden — invalid origin", http.StatusForbidden)
 			return
 		}
-		// Clear the session cookie. Attributes must match those used in
-		// SetSessionCookie so the browser treats it as the same cookie.
+		// Clear both session cookies. Attributes must match those used in the
+		// corresponding Set* functions so the browser treats them as the same cookies.
 		token.ClearSessionCookie(w, environment)
+		token.ClearIDPSessionCookie(w, environment)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
 }
