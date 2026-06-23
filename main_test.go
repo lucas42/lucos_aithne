@@ -4796,3 +4796,241 @@ func TestHandleAdminContacts_MethodNotAllowed(t *testing.T) {
 		t.Errorf("expected 405, got %d", rr.Code)
 	}
 }
+
+// --- Re-mint endpoint tests ---
+
+// setupReMintStore creates an in-memory store with a principal, WebAuthn credential,
+// and active signing key, and creates an IdP session for that principal.
+// Returns the store, principal, raw IdP session token, and a cleanup function.
+func setupReMintStore(t *testing.T) (*store.Store, *store.Principal, string) {
+	t.Helper()
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	p, err := s.CreatePrincipal(store.PrincipalClassHuman, "contact-remint-1")
+	if err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	// WebAuthn credential (just a non-revoked stub — the re-mint only checks presence).
+	if _, err := s.CreateCredential(p.ID, store.CredentialTypeWebAuthn, []byte("fake-key"), "test-passkey"); err != nil {
+		t.Fatalf("CreateCredential: %v", err)
+	}
+
+	rawToken, _, err := s.CreateIDPSession(p.ID)
+	if err != nil {
+		t.Fatalf("CreateIDPSession: %v", err)
+	}
+	return s, p, rawToken
+}
+
+func TestHandleReMint_Success(t *testing.T) {
+	s, _, rawToken := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// Should set a new aithne_session cookie.
+	found := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "aithne_session" {
+			found = true
+			if c.Value == "" {
+				t.Error("aithne_session cookie value is empty")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected aithne_session cookie in response")
+	}
+}
+
+func TestHandleReMint_NoCookie(t *testing.T) {
+	s, _, _ := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestHandleReMint_RevokedSession(t *testing.T) {
+	s, p, rawToken := setupReMintStore(t)
+
+	if _, err := s.RevokeIDPSessionsForPrincipal(p.ID); err != nil {
+		t.Fatalf("RevokeIDPSessionsForPrincipal: %v", err)
+	}
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestHandleReMint_NoActiveCredential(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	p, _ := s.CreatePrincipal(store.PrincipalClassHuman, "contact-nocred")
+	// Create a WebAuthn credential and then revoke it.
+	cred, _ := s.CreateCredential(p.ID, store.CredentialTypeWebAuthn, []byte("fake-key"), "test")
+	if err := s.RevokeCredential(cred.ID, "test-admin"); err != nil {
+		t.Fatalf("RevokeCredential: %v", err)
+	}
+
+	rawToken, _, err := s.CreateIDPSession(p.ID)
+	if err != nil {
+		t.Fatalf("CreateIDPSession: %v", err)
+	}
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleReMint_WrongMethod(t *testing.T) {
+	s, _, _ := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodGet, "/auth/remint", nil)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestHandleReMint_CORS_AllowedOrigin(t *testing.T) {
+	s, _, rawToken := setupReMintStore(t)
+	// Register an OIDC client with origin https://photos.test
+	if _, err := s.CreateOIDCClient("photos", "hash", "Photos", []string{"https://photos.test/callback"}); err != nil {
+		t.Fatalf("CreateOIDCClient: %v", err)
+	}
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	req.Header.Set("Origin", "https://photos.test")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://photos.test" {
+		t.Errorf("ACAO: got %q, want %q", got, "https://photos.test")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("ACAC: got %q, want 'true'", got)
+	}
+}
+
+func TestHandleReMint_CORS_DisallowedOrigin(t *testing.T) {
+	s, _, rawToken := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for disallowed origin, got %d", rr.Code)
+	}
+}
+
+func TestHandleReMint_CORS_Preflight(t *testing.T) {
+	s, _, _ := setupReMintStore(t)
+	if _, err := s.CreateOIDCClient("app", "hash", "App", []string{"https://app.test/cb"}); err != nil {
+		t.Fatalf("CreateOIDCClient: %v", err)
+	}
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodOptions, "/auth/remint", nil)
+	req.Header.Set("Origin", "https://app.test")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("expected 204 for preflight, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.test" {
+		t.Errorf("ACAO: got %q, want %q", got, "https://app.test")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("expected Access-Control-Allow-Methods header on preflight")
+	}
+}
+
+func TestHandleAdminPrincipalActions_RevokeIDPSessions(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	p, _ := s.CreatePrincipal(store.PrincipalClassHuman, "contact-admin-idp")
+	if _, _, err := s.CreateIDPSession(p.ID); err != nil {
+		t.Fatalf("CreateIDPSession: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/principals/", requireAdminScope(s, testIssuer, handleAdminPrincipalActions(s)))
+
+	req := httptest.NewRequest(http.MethodDelete, "/admin/principals/"+p.ID+"/idp-sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if n, ok := body["revoked"].(float64); !ok || n != 1 {
+		t.Errorf("expected revoked=1, got %v", body)
+	}
+}

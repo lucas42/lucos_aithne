@@ -610,6 +610,47 @@ func handleRotateSigningKey(s *store.Store) http.HandlerFunc {
 	}
 }
 
+// handleAdminPrincipalActions serves admin actions on a specific principal.
+// Currently supports:
+//
+//	DELETE /admin/principals/{id}/idp-sessions — revoke all active IdP sessions
+//
+// Requires aithne:admin scope (enforced by requireAdminScope in main).
+// This endpoint is the operator tool for the credential-compromise runbook:
+// after revoking a passkey credential, also call DELETE …/idp-sessions to
+// prevent further silent re-mints until the principal re-authenticates.
+func handleAdminPrincipalActions(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Path format: /admin/principals/{id}/idp-sessions
+		// Strip the prefix to get "{id}/idp-sessions".
+		rest := strings.TrimPrefix(r.URL.Path, "/admin/principals/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			http.Error(w, "400 Bad Request — path must be /admin/principals/{id}/idp-sessions", http.StatusBadRequest)
+			return
+		}
+		principalID := parts[0]
+		action := parts[1]
+
+		switch {
+		case action == "idp-sessions" && r.Method == http.MethodDelete:
+			n, err := s.RevokeIDPSessionsForPrincipal(principalID)
+			if err != nil {
+				reqLogger(r).Printf("handleAdminPrincipalActions: revoke idp sessions for %s: %v", principalID, err)
+				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+				return
+			}
+			reqLogger(r).Printf("handleAdminPrincipalActions: revoked %d idp session(s) for principal %s", n, principalID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"revoked": n})
+
+		default:
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+		}
+	}
+}
+
 // adminGrantsPage serves the browser-facing grants management UI (GET /admin/grants
 // without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
 // Contact ID lookup and grant listing are server-rendered; grant creation and revocation
@@ -1312,6 +1353,11 @@ func main() {
 	// Logout endpoint — clears the session cookie and redirects to /.
 	mux.HandleFunc("/auth/logout", handleLogout(issuer, environment))
 
+	// Silent re-mint endpoint (ADR-0003 §2) — given a valid IdP-session cookie,
+	// re-issues a fresh 15-minute aithne_session without a WebAuthn ceremony.
+	// Also handles CORS OPTIONS preflight for cross-origin calls from *.l42.eu consumers.
+	mux.HandleFunc("/auth/remint", handleReMint(s, issuer, environment, issuer))
+
 	// OAuth2/OIDC endpoints (ADR §1, §5).
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))
 	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment, tokenLimiter))
@@ -1330,6 +1376,9 @@ func main() {
 	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
 	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, issuer, handleRotateSigningKey(s)))
+	// Revoke all active IdP sessions for a principal (credential-compromise runbook).
+	// DELETE /admin/principals/{id}/idp-sessions
+	mux.HandleFunc("/admin/principals/", requireAdminScope(s, issuer, handleAdminPrincipalActions(s)))
 
 	// Invitee enrolment flow — invite-gated, no auth required.
 	mux.HandleFunc("/enrol", handleEnrolPage(s, contacts))

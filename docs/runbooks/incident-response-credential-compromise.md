@@ -179,20 +179,94 @@ access patterns inconsistent with the identified agent slugs, etc.
 
 ---
 
+---
+
+## Scenario C — Compromised human passkey (stolen device / compromised authenticator)
+
+### What's happening
+
+A human user's WebAuthn credential is on a device that has been stolen or otherwise
+compromised. The attacker can use that device to authenticate at `/auth/login/finish`
+and mint new access tokens, and — since ADR-0003 introduced long-lived IdP sessions —
+can also silently re-mint access tokens via `/auth/remint` using any IdP session
+established before the device was compromised.
+
+### Step 1 — Revoke the WebAuthn credential and IdP sessions
+
+Revoking the credential prevents new WebAuthn logins. Revoking the IdP sessions prevents
+the attacker from using the existing IdP-session cookie to re-mint access tokens.
+**Both steps are required.** A credential revocation alone does not stop re-mints while
+an active IdP session exists.
+
+You need the principal's **internal UUID** for the IdP-session revocation. Resolve it
+first if you don't have it:
+
+```sh
+# Find the principal_id for a contact ID (human principal):
+curl -s "https://aithne.l42.eu/admin/grants?principal_id=..." \
+     -H "Authorization: Bearer <your-admin-jwt>"
+# (Or look it up in the admin UI: /admin/grants?contact_id=<contact-id>)
+```
+
+**Step 1a — Revoke IdP sessions** (closes the re-mint path immediately):
+
+```sh
+curl -s -X DELETE \
+     "https://aithne.l42.eu/admin/principals/<principal-uuid>/idp-sessions" \
+     -H "Authorization: Bearer <your-admin-jwt>"
+# Response: {"revoked": N}  where N is the number of sessions invalidated.
+```
+
+After this call, any attempt to use `/auth/remint` with an existing IdP-session cookie
+returns 401. The re-mint path is closed.
+
+**Step 1b — Revoke the WebAuthn credential** (closes the direct login path):
+
+The human passkey revocation is not yet exposed in the admin UI. Use the API via the
+`/admin/machine-keys/` endpoint to revoke the credential:
+> _Note: a dedicated human-credential revocation endpoint is tracked separately._
+> In the meantime, revoke via a direct DB update or contact lucas42.
+
+### Step 2 — Understand the residual access-token window
+
+After step 1, the attacker cannot mint any new tokens. However:
+
+- Any access token (`aithne_session` JWT) already minted is valid for **up to 15 minutes**
+  from when it was issued.
+- Consumer JWKS caches add up to **5 minutes** on top.
+
+**Worst-case residual window: ≤20 minutes from the time you complete step 1.**
+
+This is the same window as Scenario A. It is a fundamental property of the stateless JWT
+design and cannot be shortened without out-of-band consumer intervention.
+
+### Step 3 — Issue a re-enrolment invite (when ready to restore access)
+
+Once the incident is contained and the user has a new/secure device:
+
+1. Issue a re-enrolment invite via the admin UI (`/admin/invites`).
+2. The user completes `/enrol` on the new device, which atomically wipes the old passkey
+   and registers the new one.
+3. Verify the user can log in via `/auth/login`.
+
+---
+
 ## Summary table
 
-| Action | Scenario A: secret compromised | Scenario B: signing key compromised |
-|---|---|---|
-| Revoke machine_key credential | ✅ Do this first | No effect (attacker doesn't need the secret) |
-| Revoke scope grants | ✅ Do this first | Partial mitigation only |
-| `POST /admin/rotate-signing-key` | ❌ Do NOT — no benefit, broad disruption | ✅ Do this first |
-| Effective window before full lockout | ≤20 min (JWT TTL + JWKS cache) | ≤35 min (VerificationWindow + JWKS cache) |
-| New tokens minted after remediation | Immediately blocked | Immediately blocked |
+| Action | Scenario A: agent secret | Scenario B: signing key | Scenario C: human passkey |
+|---|---|---|---|
+| Revoke machine_key credential | ✅ Do first | No effect | — |
+| Revoke WebAuthn credential | — | No effect | ✅ Do first |
+| **Revoke IdP sessions** | — | — | **✅ Do first (step 1a)** |
+| Revoke scope grants | ✅ Do first | Partial | Optional |
+| `POST /admin/rotate-signing-key` | ❌ Do NOT | ✅ Do first | ❌ Do NOT |
+| Effective window before full lockout | ≤20 min | ≤35 min | ≤20 min |
+| New tokens minted after remediation | Immediately blocked | Immediately blocked | Immediately blocked |
 
-The two scenarios have different effective windows. In scenario A the window is bounded
-by the JWT TTL (15 min) plus consumer JWKS cache (5 min). In scenario B it is bounded
-by the longer `VerificationWindow` (30 min) plus consumer JWKS cache (5 min). The
-difference is in what stops new tokens from being minted.
+The two-layer model after ADR-0003: for human principals, revoking the passkey credential
+closes the direct login path, but the IdP session (up to 72 h) can still drive re-mints
+until explicitly revoked. **Always revoke IdP sessions as part of a human credential
+compromise response.**
 
 ---
 
@@ -204,3 +278,4 @@ difference is in what stops new tokens from being minted.
   lockout (relevant if the compromise also locked out all admins).
 - lucas42/lucos_aithne#162 — the issue that identified this runbook gap.
 - lucas42/lucos_aithne#151 — the issue that introduced the `--rekey` subcommand.
+- lucas42/lucos_aithne#181 — the issue that added the IdP session + re-mint endpoint.
