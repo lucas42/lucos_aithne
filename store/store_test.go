@@ -369,3 +369,138 @@ func TestPing(t *testing.T) {
 		t.Errorf("Ping: %v", err)
 	}
 }
+
+// --- IdP session tests ---
+
+func TestCreateAndGetIDPSession(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreatePrincipal(PrincipalClassHuman, "contact-idp-1")
+
+	rawToken, sess, err := s.CreateIDPSession(p.ID)
+	if err != nil {
+		t.Fatalf("CreateIDPSession: %v", err)
+	}
+	if rawToken == "" {
+		t.Fatal("expected non-empty rawToken")
+	}
+	if sess.PrincipalID != p.ID {
+		t.Errorf("PrincipalID: got %q, want %q", sess.PrincipalID, p.ID)
+	}
+	if sess.ExpiresAt.IsZero() {
+		t.Fatal("ExpiresAt should not be zero")
+	}
+
+	// GetIDPSessionByToken should return the same session.
+	got, err := s.GetIDPSessionByToken(rawToken)
+	if err != nil {
+		t.Fatalf("GetIDPSessionByToken: %v", err)
+	}
+	if got.PrincipalID != p.ID {
+		t.Errorf("PrincipalID: got %q, want %q", got.PrincipalID, p.ID)
+	}
+}
+
+func TestGetIDPSessionByToken_NotFound(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.GetIDPSessionByToken("doesnotexist")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetIDPSessionByToken_Revoked(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreatePrincipal(PrincipalClassHuman, "contact-idp-revoked")
+	rawToken, _, err := s.CreateIDPSession(p.ID)
+	if err != nil {
+		t.Fatalf("CreateIDPSession: %v", err)
+	}
+
+	n, err := s.RevokeIDPSessionsForPrincipal(p.ID)
+	if err != nil {
+		t.Fatalf("RevokeIDPSessionsForPrincipal: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("revoked: got %d, want 1", n)
+	}
+
+	_, err = s.GetIDPSessionByToken(rawToken)
+	if !errors.Is(err, ErrIDPSessionRevoked) {
+		t.Errorf("got %v, want ErrIDPSessionRevoked", err)
+	}
+}
+
+func TestRevokeIDPSessionsForPrincipal_NoSessions(t *testing.T) {
+	s := newTestStore(t)
+	p, _ := s.CreatePrincipal(PrincipalClassHuman, "contact-idp-nosess")
+	n, err := s.RevokeIDPSessionsForPrincipal(p.ID)
+	if err != nil {
+		t.Fatalf("RevokeIDPSessionsForPrincipal: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("revoked: got %d, want 0", n)
+	}
+}
+
+func TestListAllowedCORSOrigins(t *testing.T) {
+	s := newTestStore(t)
+
+	// No OIDC clients → empty list.
+	origins, err := s.ListAllowedCORSOrigins()
+	if err != nil {
+		t.Fatalf("ListAllowedCORSOrigins: %v", err)
+	}
+	if len(origins) != 0 {
+		t.Errorf("got %v, want empty", origins)
+	}
+
+	// Register a client with two redirect URIs on the same origin.
+	if _, err := s.CreateOIDCClient("app1", "hash1", "Test App",
+		[]string{"https://app1.l42.eu/callback", "https://app1.l42.eu/alt"}); err != nil {
+		t.Fatalf("CreateOIDCClient: %v", err)
+	}
+	// Register a second client on a different origin.
+	if _, err := s.CreateOIDCClient("app2", "hash2", "Test App 2",
+		[]string{"https://app2.l42.eu/callback"}); err != nil {
+		t.Fatalf("CreateOIDCClient: %v", err)
+	}
+
+	origins, err = s.ListAllowedCORSOrigins()
+	if err != nil {
+		t.Fatalf("ListAllowedCORSOrigins (with clients): %v", err)
+	}
+	// Expect exactly two distinct origins (app1 deduplicated to one).
+	gotSet := map[string]bool{}
+	for _, o := range origins {
+		gotSet[o] = true
+	}
+	if !gotSet["https://app1.l42.eu"] {
+		t.Errorf("expected https://app1.l42.eu in origins, got %v", origins)
+	}
+	if !gotSet["https://app2.l42.eu"] {
+		t.Errorf("expected https://app2.l42.eu in origins, got %v", origins)
+	}
+	if len(gotSet) != 2 {
+		t.Errorf("expected 2 distinct origins, got %d: %v", len(gotSet), origins)
+	}
+}
+
+func TestExtractOrigin(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://photos.l42.eu/callback", "https://photos.l42.eu"},
+		{"https://app.l42.eu", "https://app.l42.eu"},
+		{"http://localhost:3000/auth/cb", "http://localhost:3000"},
+		{"", ""},
+		{"notauri", ""},
+		{"https://", ""},
+	}
+	for _, tc := range tests {
+		got := extractOrigin(tc.input)
+		if got != tc.want {
+			t.Errorf("extractOrigin(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

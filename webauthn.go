@@ -488,6 +488,18 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		}
 		token.SetSessionCookie(w, tok, environment)
 
+		// Establish a long-lived IdP session (ADR-0003 §1) alongside the
+		// access token. The IdP session cookie gates the silent re-mint endpoint;
+		// its lifetime (72 h) is the new ceiling on silent continuity.
+		// Non-fatal: if session creation fails, the access token is still valid
+		// and the user is logged in — they just won't get silent re-mints.
+		idpRaw, _, idpErr := s.CreateIDPSession(user.principal.ID)
+		if idpErr != nil {
+			reqLogger(r).Printf("login/finish: create idp session for principal %s: %v (non-fatal — access token is valid)", user.principal.ID, idpErr)
+		} else {
+			token.SetIDPSessionCookie(w, idpRaw, environment)
+		}
+
 		// Determine safe redirect target. The client passes the `next` query
 		// param it found on the login page URL; we validate it server-side so
 		// the JS only needs to follow whatever the server returns.

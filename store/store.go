@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -93,7 +94,29 @@ var (
 
 	// ErrCredentialRevoked is returned when attempting to revoke an already-revoked credential.
 	ErrCredentialRevoked = errors.New("store: credential is already revoked")
+
+	// ErrIDPSessionExpired is returned when an IdP session has passed its expires_at.
+	ErrIDPSessionExpired = errors.New("store: IdP session has expired")
+
+	// ErrIDPSessionRevoked is returned when an IdP session has been explicitly revoked.
+	ErrIDPSessionRevoked = errors.New("store: IdP session has been revoked")
 )
+
+// IDPSession is a long-lived server-side session established at WebAuthn login
+// per ADR-0003 §1. It is the credential gating the silent re-mint endpoint.
+// Raw tokens are never stored; only SHA-256(rawToken) is persisted.
+type IDPSession struct {
+	TokenHash   string
+	PrincipalID string
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	RevokedAt   *time.Time
+}
+
+// IsValid reports whether the session is neither expired nor revoked.
+func (s *IDPSession) IsValid() bool {
+	return s.RevokedAt == nil && s.ExpiresAt.After(time.Now())
+}
 
 // Store manages aithne's principal registry and credential store via SQLite.
 type Store struct {
@@ -224,6 +247,22 @@ func (s *Store) migrate() error {
 			created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
 			used_at      DATETIME
 		)`,
+		// idp_sessions stores long-lived IdP session tokens per ADR-0003 §1.
+		// The raw token is returned to the principal as a cookie at WebAuthn login;
+		// only SHA-256(rawToken) is stored here. IdP sessions outlive the short-lived
+		// aithne_session access token (15 min) and are the revocation control for
+		// the silent re-mint endpoint: revoking an IdP session prevents further
+		// re-mints by that principal.
+		`CREATE TABLE IF NOT EXISTS idp_sessions (
+			token_hash   TEXT PRIMARY KEY,
+			principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+			created_at   DATETIME NOT NULL,
+			expires_at   DATETIME NOT NULL,
+			revoked_at   DATETIME
+		)`,
+		// Index to speed up RevokeIDPSessionsForPrincipal (bulk revoke by principal).
+		`CREATE INDEX IF NOT EXISTS idx_idp_sessions_principal
+		 ON idp_sessions(principal_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -664,6 +703,209 @@ func (s *Store) ReplaceWebAuthnCredentialAndConsumeInvite(principalID, rawToken 
 		Label:       label,
 		CreatedAt:   now,
 	}, nil
+}
+
+// --- IdP session store (ADR-0003 §1) ---
+
+// IdPSessionTTL is the lifetime of a long-lived IdP session.
+// 72 hours (3 working days) is the chosen cap — enough for a full working session,
+// short enough to bound the silent re-mint window. Documented here per ADR-0003
+// ("pick and record the value").
+const IdPSessionTTL = 72 * time.Hour
+
+// CreateIDPSession creates a new long-lived IdP session for principalID.
+// Returns the raw (unhashed) token, which must be delivered to the client as a cookie
+// and never stored. Only the SHA-256 hash is persisted in the database.
+func (s *Store) CreateIDPSession(principalID string) (string, *IDPSession, error) {
+	rawToken, err := generateRawToken()
+	if err != nil {
+		return "", nil, fmt.Errorf("store: generate idp session token: %w", err)
+	}
+	hash := HashToken(rawToken)
+	now := time.Now().UTC()
+	expiresAt := now.Add(IdPSessionTTL)
+	_, err = s.db.Exec(
+		`INSERT INTO idp_sessions (token_hash, principal_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?)`,
+		hash, principalID, now.Format(time.RFC3339), expiresAt.Format(time.RFC3339),
+	)
+	if err != nil {
+		if isFKViolation(err) {
+			return "", nil, ErrNotFound // principal doesn't exist
+		}
+		return "", nil, fmt.Errorf("store: create idp session: %w", err)
+	}
+	session := &IDPSession{
+		TokenHash:   hash,
+		PrincipalID: principalID,
+		CreatedAt:   now,
+		ExpiresAt:   expiresAt,
+	}
+	return rawToken, session, nil
+}
+
+// GetIDPSessionByToken looks up an IdP session by raw (unhashed) token.
+// Returns ErrNotFound if the token does not exist.
+// Returns ErrIDPSessionRevoked if the session has been explicitly revoked.
+// Returns ErrIDPSessionExpired if the session has passed its expires_at.
+// Callers must check these errors; using an expired or revoked session is not allowed.
+func (s *Store) GetIDPSessionByToken(rawToken string) (*IDPSession, error) {
+	hash := HashToken(rawToken)
+	row := s.db.QueryRow(
+		`SELECT token_hash, principal_id, created_at, expires_at, revoked_at
+		 FROM idp_sessions WHERE token_hash = ?`,
+		hash,
+	)
+	sess := &IDPSession{}
+	var createdAt, expiresAt string
+	var revokedAt sql.NullString
+	if err := row.Scan(&sess.TokenHash, &sess.PrincipalID, &createdAt, &expiresAt, &revokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: scan idp session: %w", err)
+	}
+	var err error
+	sess.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse idp session created_at: %w", err)
+	}
+	sess.ExpiresAt, err = parseTime(expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse idp session expires_at: %w", err)
+	}
+	if revokedAt.Valid {
+		t, err := parseTime(revokedAt.String)
+		if err != nil {
+			return nil, fmt.Errorf("store: parse idp session revoked_at: %w", err)
+		}
+		sess.RevokedAt = &t
+		return nil, ErrIDPSessionRevoked
+	}
+	if sess.ExpiresAt.Before(time.Now()) {
+		return nil, ErrIDPSessionExpired
+	}
+	return sess, nil
+}
+
+// RevokeIDPSessionsForPrincipal marks all active IdP sessions for principalID as
+// revoked, effective immediately. This is the load-bearing revocation step in
+// Scenario A of the credential-compromise runbook: after revoking a passkey, also
+// call this so the re-mint endpoint cannot issue fresh access tokens.
+// Returns the number of sessions revoked.
+func (s *Store) RevokeIDPSessionsForPrincipal(principalID string) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Exec(
+		`UPDATE idp_sessions SET revoked_at = ?
+		 WHERE principal_id = ? AND revoked_at IS NULL`,
+		now, principalID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: revoke idp sessions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: revoke idp sessions rows-affected: %w", err)
+	}
+	return int(n), nil
+}
+
+// RevokeIDPSessionByToken marks the single IdP session identified by rawToken as
+// revoked, effective immediately. This is called by handleLogout to invalidate the
+// server-side record when the user explicitly logs out, so the token cannot be
+// exploited even if captured before the browser discarded the cookie.
+// Returns without error if the token is not found or already revoked.
+func (s *Store) RevokeIDPSessionByToken(rawToken string) error {
+	hash := HashToken(rawToken)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`UPDATE idp_sessions SET revoked_at = ?
+		 WHERE token_hash = ? AND revoked_at IS NULL`,
+		now, hash,
+	)
+	if err != nil {
+		return fmt.Errorf("store: revoke idp session by token: %w", err)
+	}
+	return nil
+}
+
+// ListAllowedCORSOrigins returns the set of HTTPS origins that are permitted to
+// make credentialed cross-site fetch() calls to the re-mint endpoint (ADR-0003 §2).
+// Origins are derived from the registered OIDC clients' redirect_uris: any origin
+// whose redirect_uri is registered is considered a consumer of aithne and is allowed
+// to trigger re-mints. This keeps the allow-list self-maintaining — registering a
+// new OIDC client automatically grants it re-mint CORS access.
+func (s *Store) ListAllowedCORSOrigins() ([]string, error) {
+	rows, err := s.db.Query(`SELECT redirect_uris FROM oidc_clients`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list cors origins: %w", err)
+	}
+	defer rows.Close()
+
+	seen := map[string]struct{}{}
+	var origins []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("store: scan redirect_uris: %w", err)
+		}
+		var uris []string
+		if err := json.Unmarshal([]byte(raw), &uris); err != nil {
+			continue // malformed JSON — skip silently
+		}
+		for _, u := range uris {
+			origin := extractOrigin(u)
+			if origin == "" {
+				continue
+			}
+			if _, dup := seen[origin]; !dup {
+				seen[origin] = struct{}{}
+				origins = append(origins, origin)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate cors origins: %w", err)
+	}
+	return origins, nil
+}
+
+// extractOrigin returns the scheme+host part of a URI string (e.g.
+// "https://photos.l42.eu" from "https://photos.l42.eu/auth/callback").
+// Returns "" if the URI cannot be parsed or has no scheme/host.
+func extractOrigin(rawURI string) string {
+	// Fast path: avoid net/url import by scanning for the third slash.
+	if rawURI == "" {
+		return ""
+	}
+	// Find "://"
+	schemeEnd := strings.Index(rawURI, "://")
+	if schemeEnd < 0 {
+		return ""
+	}
+	rest := rawURI[schemeEnd+3:]
+	// Host ends at the first "/" or end of string.
+	hostEnd := strings.IndexByte(rest, '/')
+	var host string
+	if hostEnd < 0 {
+		host = rest
+	} else {
+		host = rest[:hostEnd]
+	}
+	if host == "" {
+		return ""
+	}
+	return rawURI[:schemeEnd] + "://" + host
+}
+
+// generateRawToken returns a 32-byte cryptographically random token encoded as
+// hex. The caller must store only the SHA-256 hash, not the raw value.
+func generateRawToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // isUniqueViolation reports whether err is a SQLite UNIQUE constraint error.
