@@ -23,7 +23,7 @@ Each consumer gates access on a scope string (e.g. `photos:read`). Enumerate the
 
 ### P2. Session continuity is in place
 
-Confirm the keepalive is shipped and deployed: aithne#181 (IdP session + re-mint endpoint) and the `lucos_navbar` release that closes lucas42/lucos_navbar#174. Consumers pin **at least that navbar version** (record the exact version here once #174 ships). With it, human sessions stay alive while a tab is open — no per-form code, no 15-minute re-auth.
+Confirm the keepalive is shipped and deployed: aithne#181 (IdP session + re-mint endpoint) and the `lucos_navbar` release that closed lucas42/lucos_navbar#174. Consumers pin **`lucos_navbar >= 2.2.0`**. With it, human sessions stay alive while a tab is open — no per-form code, no 15-minute re-auth.
 
 ### P3. `AITHNE_ORIGIN` convention
 
@@ -44,6 +44,8 @@ Follow local-verification-contract.md §1–6 for the verification itself, then 
 1. **Valid token *and* required scope** → proceed.
 2. **Valid token, missing/wrong scope** → render **the consumer's own styled 403** (its existing error view). **Do not** redirect to login — the user is already signed in; re-login yields the same scopeless token and an infinite loop. There is **no** shared aithne "request access" endpoint.
 3. **No token, or expired/invalid** → redirect to `{AITHNE_ORIGIN}/auth/login?next=…`.
+
+   **Defense in depth — `?next=` open-redirect guard:** populate `next` from the current server-side request path (e.g. `req.path` or equivalent), never from a user-supplied query parameter. Reflecting a caller-controlled `?next=` value would allow an attacker to craft a login URL that redirects the user to an arbitrary external site after authentication. The `next` value must be an internal path only.
 
 Wire the two standard exemptions (ADR-0001 / contract doc): `/_info` is exempt from auth, and the `render-ui` dev bypass.
 
