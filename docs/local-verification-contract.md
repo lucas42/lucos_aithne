@@ -226,8 +226,8 @@ grant_type=client_credentials&client_id=<agent-slug>&client_secret=<secret>&scop
 
 | `error` | HTTP | Meaning |
 |---|---|---|
-| `invalid_request` | 400 | Malformed body / missing `grant_type`. |
-| `unsupported_grant_type` | 400 | `grant_type` was not `client_credentials`. |
+| `invalid_request` | 400 | The form body could not be parsed. |
+| `unsupported_grant_type` | 400 | `grant_type` was missing or not a supported grant (`client_credentials`). |
 | `invalid_client` | 401 | Unknown `client_id`, or wrong/revoked `client_secret`. (The two are deliberately indistinguishable — no information leak.) |
 | `invalid_scope` | 400 | A requested scope is not granted to this principal in the current environment. |
 | `server_error` | 500 | aithne-side failure. |
