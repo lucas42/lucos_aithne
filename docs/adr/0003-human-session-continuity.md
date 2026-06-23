@@ -63,6 +63,22 @@ Timers don't fire while a laptop sleeps; a tab woken with an expired cookie has 
 - **The wake-from-sleep race** persists unless the submit-intercept (§5) is implemented; without it, a tab woken past expiry can still drop one POST in a narrow window.
 - **Idle-with-tab-open extends the session** to the IdP-session cap (the keepalive refreshes even an idle tab). Conventional, but it means "tab open" ≈ "session alive"; the IdP-session cap is the backstop.
 
+## Amendment — 2026-06-23: CORS allow-list changed to `*.l42.eu` origin glob
+
+**Issue:** lucas42/lucos_aithne#191 **PR:** lucas42/lucos_aithne#195 *(or the merged PR)*
+
+The initial implementation of §2 derived the re-mint CORS allow-list from registered OIDC clients' `redirect_uri` values. This created a structural gap: JWKS-local consumers (those that validate aithne JWTs directly without an OIDC client registration) had no path into the allow-list and were silently 403'd on every re-mint call.
+
+**Decision:** Replace the OIDC-derived allow-list with an origin-suffix check (`^https://[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*\.l42\.eu$`). Any `https://*.l42.eu` origin is allowed to make credentialed cross-site requests to `/auth/remint`. The matched origin is echoed in `Access-Control-Allow-Origin` (required by the CORS spec; a wildcard is spec-invalid with credentials).
+
+**Why this is safe (threat model):** The glob widens the allow-list to any `*.l42.eu` subdomain, registered or not. The net attacker gain over the original explicit-membership approach is a mild timing oracle ("does this visitor have an active aithne session?"). This is not a useful attack primitive because `/auth/remint` is designed to be *harmless-if-forged*:
+
+- The attacker cannot read the response (`HttpOnly` cookie + CORS blocks the body).
+- The only outcome of a forged trigger is refreshing the victim's own session — no credential exfiltration, no lateral capability.
+- The principal is synchronously re-validated on every call; scope revocation takes effect within one re-mint interval.
+
+**Load-bearing constraint:** The glob is safe *only while `/auth/remint` remains harmless-if-forged*. Any future change adding a readable response body, an externally-observable side-effect, or any capability extractable across the CORS boundary **must tighten the CORS policy before shipping**. This constraint is recorded in the `remint.go` package-level comment and must survive any future refactor of that file.
+
 ## Follow-up (implementation — tracked separately)
 
 The work this ADR defers, each to its own issue:

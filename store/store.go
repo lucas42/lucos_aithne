@@ -15,7 +15,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -827,75 +826,6 @@ func (s *Store) RevokeIDPSessionByToken(rawToken string) error {
 		return fmt.Errorf("store: revoke idp session by token: %w", err)
 	}
 	return nil
-}
-
-// ListAllowedCORSOrigins returns the set of HTTPS origins that are permitted to
-// make credentialed cross-site fetch() calls to the re-mint endpoint (ADR-0003 §2).
-// Origins are derived from the registered OIDC clients' redirect_uris: any origin
-// whose redirect_uri is registered is considered a consumer of aithne and is allowed
-// to trigger re-mints. This keeps the allow-list self-maintaining — registering a
-// new OIDC client automatically grants it re-mint CORS access.
-func (s *Store) ListAllowedCORSOrigins() ([]string, error) {
-	rows, err := s.db.Query(`SELECT redirect_uris FROM oidc_clients`)
-	if err != nil {
-		return nil, fmt.Errorf("store: list cors origins: %w", err)
-	}
-	defer rows.Close()
-
-	seen := map[string]struct{}{}
-	var origins []string
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("store: scan redirect_uris: %w", err)
-		}
-		var uris []string
-		if err := json.Unmarshal([]byte(raw), &uris); err != nil {
-			continue // malformed JSON — skip silently
-		}
-		for _, u := range uris {
-			origin := extractOrigin(u)
-			if origin == "" {
-				continue
-			}
-			if _, dup := seen[origin]; !dup {
-				seen[origin] = struct{}{}
-				origins = append(origins, origin)
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate cors origins: %w", err)
-	}
-	return origins, nil
-}
-
-// extractOrigin returns the scheme+host part of a URI string (e.g.
-// "https://photos.l42.eu" from "https://photos.l42.eu/auth/callback").
-// Returns "" if the URI cannot be parsed or has no scheme/host.
-func extractOrigin(rawURI string) string {
-	// Fast path: avoid net/url import by scanning for the third slash.
-	if rawURI == "" {
-		return ""
-	}
-	// Find "://"
-	schemeEnd := strings.Index(rawURI, "://")
-	if schemeEnd < 0 {
-		return ""
-	}
-	rest := rawURI[schemeEnd+3:]
-	// Host ends at the first "/" or end of string.
-	hostEnd := strings.IndexByte(rest, '/')
-	var host string
-	if hostEnd < 0 {
-		host = rest
-	} else {
-		host = rest[:hostEnd]
-	}
-	if host == "" {
-		return ""
-	}
-	return rawURI[:schemeEnd] + "://" + host
 }
 
 // generateRawToken returns a 32-byte cryptographically random token encoded as
