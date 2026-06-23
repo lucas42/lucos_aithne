@@ -4,9 +4,10 @@ import "testing"
 
 func TestIsAllowedRedirect(t *testing.T) {
 	cases := []struct {
-		name  string
-		input string
-		want  bool
+		name        string
+		input       string
+		environment string // "" behaves like "production" (dev check is == "development" only)
+		want        bool
 	}{
 		// Safe: bare paths (same-origin)
 		{name: "root path", input: "/", want: true},
@@ -39,6 +40,11 @@ func TestIsAllowedRedirect(t *testing.T) {
 		// Unsafe: double-slash path (browser-parsed as protocol-relative)
 		{name: "double-slash path", input: "//evil.com", want: false},
 
+		// Unsafe: backslash paths — WHATWG URL normalises \ to /, so "\\/evil.com"
+		// would be interpreted as "//evil.com" (a protocol-relative open redirect).
+		{name: "backslash path", input: "\\evil.com", want: false},
+		{name: "backslash-slash path", input: "\\/evil.com", want: false},
+
 		// Edge cases explicitly considered — not open-redirect attacks but
 		// documented here to show the behaviour was thought through:
 		//
@@ -51,13 +57,24 @@ func TestIsAllowedRedirect(t *testing.T) {
 		// The browser resolves it relative to aithne.l42.eu so the user stays
 		// in-estate. Malformed but not an open redirect.
 		{name: "relative path no leading slash", input: "evil.com/path", want: true},
+
+		// Dev-environment: localhost origins accepted (any port, or no port).
+		{name: "dev localhost with port", input: "http://localhost:3000/path", environment: "development", want: true},
+		{name: "dev localhost no port", input: "http://localhost/path", environment: "development", want: true},
+		{name: "dev 127.0.0.1 with port", input: "http://127.0.0.1:8080/", environment: "development", want: true},
+		{name: "dev 127.0.0.1 no port", input: "http://127.0.0.1/", environment: "development", want: true},
+		// Dev-environment: https://localhost is NOT accepted (dev doesn't use TLS).
+		{name: "dev https localhost rejected", input: "https://localhost:3000/path", environment: "development", want: false},
+		// Dev-environment: localhost is rejected in production.
+		{name: "dev localhost in prod", input: "http://localhost:3000/path", environment: "production", want: false},
+		{name: "dev localhost in prod empty env", input: "http://localhost:3000/path", environment: "", want: false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isAllowedRedirect(tc.input)
+			got := isAllowedRedirect(tc.input, tc.environment)
 			if got != tc.want {
-				t.Errorf("isAllowedRedirect(%q) = %v; want %v", tc.input, got, tc.want)
+				t.Errorf("isAllowedRedirect(%q, %q) = %v; want %v", tc.input, tc.environment, got, tc.want)
 			}
 		})
 	}

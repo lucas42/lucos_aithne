@@ -25,13 +25,19 @@ package main
 // also adding a CSRF token. The endpoint must remain "re-issue existing session only"
 // for this reasoning to hold.
 //
-// # CORS allow-list — *.l42.eu origin glob (ADR-0003 §2, amended 2026-06-23)
+// # CORS allow-list — *.l42.eu origin glob + dev-localhost (ADR-0003 §2, amended 2026-06-23)
 //
-// Any HTTPS origin matching the *.l42.eu suffix (e.g. https://arachne.l42.eu,
+// Production: any HTTPS origin matching the *.l42.eu suffix (e.g. https://arachne.l42.eu,
 // https://photos.l42.eu) is allowed to make credentialed cross-site fetch() calls
-// to this endpoint. The matched origin is echoed in Access-Control-Allow-Origin
-// (required by the CORS spec when credentials are involved; a static "*" is
-// spec-invalid with credentials per WHATWG Fetch §3.2.5).
+// to this endpoint.
+//
+// Development (ENVIRONMENT=development): additionally accepts http://localhost:<port>
+// and http://127.0.0.1:<port>. A port is required in CORS origins (browsers include
+// it for non-default ports; portless http://localhost:80 is never sent in practice).
+//
+// The matched origin is always echoed in Access-Control-Allow-Origin (required by
+// the CORS spec when credentials are involved; a static "*" is spec-invalid with
+// credentials per WHATWG Fetch §3.2.5).
 //
 // This glob is safe ONLY because the endpoint is "harmless-if-forged" (see CSRF
 // section above). If any future change adds a readable response body, a side-effect
@@ -47,6 +53,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"regexp"
 
 	"lucos_aithne/store"
@@ -66,7 +73,7 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 		// Handle CORS preflight (OPTIONS) before method check so browsers can
 		// complete the preflight without a 405.
 		if r.Method == http.MethodOptions {
-			handleReMintPreflight(w, r)
+			handleReMintPreflight(w, r, environment)
 			return
 		}
 
@@ -77,8 +84,8 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 
 		// Apply CORS headers for the actual request (cross-origin fetch).
 		// setCORSHeaders returns false and writes 403 if the Origin is present but
-		// not matched by the *.l42.eu glob — in that case we must not proceed.
-		if !setCORSHeaders(w, r, appOrigin) {
+		// not matched by the allow-list — in that case we must not proceed.
+		if !setCORSHeaders(w, r, appOrigin, environment) {
 			return
 		}
 
@@ -190,9 +197,9 @@ func handleReMint(s *store.Store, issuer, environment, appOrigin string) http.Ha
 // handleReMintPreflight handles the OPTIONS preflight request for /auth/remint.
 // The browser sends OPTIONS before the credentialed cross-origin POST;
 // we must respond with the CORS allow headers for the browser to proceed.
-func handleReMintPreflight(w http.ResponseWriter, r *http.Request) {
+func handleReMintPreflight(w http.ResponseWriter, r *http.Request, environment string) {
 	appOrigin := "" // preflight doesn't need app-origin bypass
-	if !setCORSHeaders(w, r, appOrigin) {
+	if !setCORSHeaders(w, r, appOrigin, environment) {
 		return // setCORSHeaders already wrote 403
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -201,16 +208,21 @@ func handleReMintPreflight(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// setCORSHeaders inspects the Origin request header and, if the origin matches
-// the *.l42.eu glob, sets the CORS response headers and returns true.
+// setCORSHeaders inspects the Origin request header and, if the origin is
+// allowed, sets the CORS response headers and returns true.
 // If Origin is absent or equals appOrigin (same-origin), no headers are set and
 // true is returned (non-cross-origin requests proceed without CORS headers).
-// If Origin is present but does not match *.l42.eu, 403 is written and false returned.
+// If Origin is present but not in the allow-list, 403 is written and false returned.
 //
-// Safe to use as a glob because /auth/remint is harmless-if-forged — see the
+// Allow-list:
+//   - Production: any https://*.l42.eu origin (l42euOriginRe).
+//   - Development: additionally http://localhost:<port> and http://127.0.0.1:<port>
+//     (isDevLocalhostURL from redirect.go, same package; port required for CORS).
+//
+// Safe to use a glob because /auth/remint is harmless-if-forged — see the
 // package-level CORS comment above for the threat-model rationale and the
 // explicit warning about future footguns.
-func setCORSHeaders(w http.ResponseWriter, r *http.Request, appOrigin string) bool {
+func setCORSHeaders(w http.ResponseWriter, r *http.Request, appOrigin, environment string) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" || origin == appOrigin {
 		// No Origin header (non-browser / same-origin) — proceed without CORS headers.
@@ -227,7 +239,19 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request, appOrigin string) bo
 		return true
 	}
 
-	// Origin does not match *.l42.eu — reject the cross-origin request.
+	// Dev-environment: accept http://localhost:<port> and http://127.0.0.1:<port>.
+	// Port is required — browsers always include it for non-default ports, and
+	// portless http://localhost (port 80) is never used in practice for dev services.
+	if environment == "development" {
+		if u, err := url.Parse(origin); err == nil && u.Port() != "" && isDevLocalhostURL(u) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+			return true
+		}
+	}
+
+	// Origin does not match the allow-list — reject the cross-origin request.
 	http.Error(w, "403 Forbidden — origin not allowed", http.StatusForbidden)
 	return false
 }
