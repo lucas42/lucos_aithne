@@ -5058,6 +5058,63 @@ func TestHandleReMint_CORS_Preflight(t *testing.T) {
 	}
 }
 
+func TestHandleReMint_CORS_DevLocalhostAllowed(t *testing.T) {
+	// In development, http://localhost:<port> is allowed (keepalive from a dev consumer).
+	s, _, rawToken := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	req.Header.Set("Origin", "http://localhost:3000")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for dev localhost origin, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+		t.Errorf("ACAO: got %q, want %q", got, "http://localhost:3000")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("ACAC: got %q, want 'true'", got)
+	}
+}
+
+func TestHandleReMint_CORS_DevLocalhostPreflight(t *testing.T) {
+	// In development, OPTIONS preflight from http://127.0.0.1:<port> should return 204.
+	s, _, _ := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "development", testIssuer)
+	req := httptest.NewRequest(http.MethodOptions, "/auth/remint", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Errorf("expected 204 for dev localhost preflight, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:8080" {
+		t.Errorf("ACAO: got %q, want %q", got, "http://127.0.0.1:8080")
+	}
+}
+
+func TestHandleReMint_CORS_DevLocalhostRejectedInProd(t *testing.T) {
+	// In production, http://localhost:<port> must be rejected even with a valid session.
+	s, _, rawToken := setupReMintStore(t)
+
+	handler := handleReMint(s, testIssuer, "production", testIssuer)
+	req := httptest.NewRequest(http.MethodPost, "/auth/remint", nil)
+	req.AddCookie(&http.Cookie{Name: token.IdPSessionCookieName, Value: rawToken})
+	req.Header.Set("Origin", "http://localhost:3000")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for localhost origin in production, got %d", rr.Code)
+	}
+}
+
 func TestHandleAdminPrincipalActions_RevokeIDPSessions(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {

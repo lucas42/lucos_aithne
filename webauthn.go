@@ -505,7 +505,7 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		// the JS only needs to follow whatever the server returns.
 		next := r.URL.Query().Get("next")
 		redirect := "/"
-		if isAllowedRedirect(next) {
+		if isAllowedRedirect(next, environment) {
 			redirect = next
 		}
 
