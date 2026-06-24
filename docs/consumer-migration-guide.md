@@ -57,9 +57,20 @@ Per P3: add it to `docker-compose.yml` (`environment:`, array syntax) and store 
 
 The auth path needs a **real token or a deliberate test double**, not a mock that asserts nothing about the real JWKS/verification interface. Exercise all three branches.
 
+### C5. Audit write endpoints for CSRF protection
+
+`aithne_session` is `SameSite=None`, so the browser sends it on **all** cross-origin requests — including state-mutating `POST`/`PUT`/`PATCH`/`DELETE`. This is a CSRF-posture **regression** from the `lucos_authentication` `auth_token` cookie it replaces: that cookie set no `SameSite` attribute, so modern browsers defaulted it to `SameSite=Lax` and withheld it from cross-origin POSTs. **Do not assume an existing write endpoint is already protected** — under the old cookie it was protected implicitly, and that protection disappears on migration.
+
+Every consumer with **cookie-authenticated** write endpoints MUST add explicit CSRF mitigation — see local-verification-contract.md §"CSRF protection required for cookie-based state mutation" for the full contract. The two accepted approaches:
+
+- require a custom request header (e.g. `X-Requested-With: XMLHttpRequest`) on state-mutating requests, or
+- validate the `Origin` / `Referer` header against an expected `*.l42.eu` origin.
+
+A consumer that authenticates its write endpoints with an `Authorization: Bearer` token (rather than the cookie) is **not** affected — browsers don't attach `Authorization` to CSRF-triggered cross-origin requests.
+
 ## Verify the rollout
 
-Per consumer, against the running service (not just unit tests): a human with the grant reaches the resource; a signed-in human **without** the grant sees the styled 403 (not a redirect loop); an unauthenticated request is redirected to login; `/_info` stays reachable without auth; a session left open past 15 minutes stays alive (keepalive).
+Per consumer, against the running service (not just unit tests): a human with the grant reaches the resource; a signed-in human **without** the grant sees the styled 403 (not a redirect loop); an unauthenticated request is redirected to login; `/_info` stays reachable without auth; a session left open past 15 minutes stays alive (keepalive); and — for any consumer with cookie-authenticated write endpoints — a cross-origin state-mutating request sent **without** the required CSRF header (or with a non-`l42.eu` `Origin`) is **rejected** (C5).
 
 ## Rollout safety — halt criterion and rollback
 
