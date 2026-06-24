@@ -90,9 +90,28 @@ been rotated).
 Read the `kid` field from the JWT header. Look up the matching key in the cached key
 set. If no matching key is found even after a cache refresh, reject the token.
 
+**Sanitise `kid` before logging it.** `kid` is an attacker-controlled JWT header field,
+and it appears **verbatim** in the error messages of common libraries (`PyJWKClientError`,
+`jose`). Logging such a message unmodified lets an attacker inject arbitrary content —
+including newlines and terminal control sequences — into the log stream (log injection /
+log forging). Before logging any `kid`-bearing value or error message, strip the C0
+control characters (`\x00`–`\x1f`) and DEL (`\x7f`). This applies wherever the `kid`
+(or a library error carrying it) reaches a log call, not only at this step.
+(Requirement from lucas42/lucos_arachne#646.)
+
 ### 3. Verify the signature
 
 Use the matching EC public key (P-256) to verify the JWS signature. Reject if invalid.
+
+**Pin the verification algorithm to ES256.** The verify call MUST constrain the accepted
+algorithm explicitly — pass `algorithms: ['ES256']` (jose / PyJWT) or the
+library-equivalent parameter — and MUST NOT trust the `alg` named in the token header.
+A verifier that accepts whatever the header declares is open to an **algorithm-confusion
+attack**: e.g. an unsigned `alg: none` token, or coercing the asymmetric verify into a
+symmetric one by presenting an `HS256` token whose "signature" is computed by treating the
+EC public key bytes as the HMAC secret. The signing algorithm is fixed by this contract
+(ES256, §"Token format"); the verifier enforces it, the token never selects it.
+(Requirement from lucas42/lucos_arachne#637.)
 
 ### 4. Validate standard claims
 
@@ -315,6 +334,13 @@ Consumers MUST therefore:
 - **Reject a token only when its `kid` is genuinely absent** from the held key set **and**
   a refresh was attempted (and either failed or returned no matching key) — not merely
   because a refresh failed.
+- **Log a failed JWKS fetch distinctly, at `WARNING` level, before any fallback or retry.**
+  A JWKS outage during a cold start or a forced refresh otherwise surfaces only as a silent
+  401 storm, indistinguishable from "every token is genuinely invalid". Per-token JWT
+  decode/validation failures, by contrast, MAY be logged silently or at low severity — they
+  are expected noise (expired tokens, stale bookmarks, the occasional forged token). Logging
+  the two at different severities is what lets an operator tell a JWKS outage apart from a
+  wave of invalid tokens during an incident. (Requirement from lucas42/lucos_arachne#641.)
 
 > **Library caveat.** The common off-the-shelf clients do **not** do this by default:
 > `jose`'s `createRemoteJWKSet` (Node) and `PyJWKClient` (Python) **raise** on a failed
@@ -335,6 +361,9 @@ import (
 keySet, err := jwk.Fetch(ctx, "https://aithne.l42.eu/.well-known/jwks.json")
 
 // Per-request verification:
+// NB: pin the signature algorithm to ES256 — see §3 "Verify the signature". Configure
+// the key set / verify options so only ES256 is accepted; never let the token's header
+// `alg` select the algorithm.
 tok, err := jwt.ParseString(tokenStr,
     jwt.WithKeySet(keySet),
     jwt.WithValidate(true),
