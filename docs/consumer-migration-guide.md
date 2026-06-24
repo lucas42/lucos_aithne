@@ -60,3 +60,31 @@ The auth path needs a **real token or a deliberate test double**, not a mock tha
 ## Verify the rollout
 
 Per consumer, against the running service (not just unit tests): a human with the grant reaches the resource; a signed-in human **without** the grant sees the styled 403 (not a redirect loop); an unauthenticated request is redirected to login; `/_info` stays reachable without auth; a session left open past 15 minutes stays alive (keepalive).
+
+## Rollout safety — halt criterion and rollback
+
+This is a **bulk** flip of the estate's consumers in waves, so decide *before the first wave* what "a wave has gone wrong" looks like and how to back it out. It needs no new monitoring component — the signals already exist.
+
+The failure mode to catch is **quiet**: a mis-ordered grant (scope not yet granted before enforce) or a consumer-side verification bug renders branch 2 — the consumer's own **styled 403**. A signed-in human sees a polite access-denied page and may never report it, so the rollout looks healthy while it silently locks people out. The watch below is what turns that silent failure into an observable one.
+
+### The signal (already exists)
+
+The **lucos_router access log** records per-domain HTTP status codes for every request it proxies — no new instrumentation required. Auth failures show up as **401** (no/invalid token → redirected, but a stuck loop re-hits) and **403** (valid token, missing scope → styled 403). Watch the sum of 401 + 403 for the flipped consumer's domain.
+
+- **Exclude 499** — that's an Nginx client-closed-connection code, not an auth result; counting it produces false alarms (per prior cutover experience).
+- The board's `fetch-info` check on the consumer won't catch this: `/_info` is auth-exempt (C2), so it stays 200 green while real user paths 403.
+
+### Halt criterion (per flipped consumer)
+
+1. **Before flipping**, capture a ~10-minute pre-flip **baseline** of 401 + 403 for the target domain from the router access log. Most consumers sit near zero; some have a steady trickle (bots, stale bookmarks) — the baseline is what makes the comparison meaningful rather than absolute.
+2. **After flipping**, watch the same domain's 401 + 403 rate. **If it rises materially above the baseline and stays there past one JWKS-cache TTL (~5 min), halt the wave** and roll back the affected consumer(s).
+
+The one-cache-TTL settle window matters: during convergence, consumers holding a token signed just before a key event can momentarily 401/403 on stale-cache timing. Those clear themselves within a cache TTL — a spike that *persists* past it is a real grant/verification fault, not convergence noise.
+
+### Per-consumer rollback
+
+Rollback is a **standard orb redeploy of the consumer's last-green pipeline** — redeploy the previous image, nothing aithne-side to undo.
+
+This is valid because the migration leaves the old `lucos_authentication` `auth_token` cookie path **in place** until the final per-consumer cleanup (lucas42/lucos_aithne#12 step 8). During the flip window both auth paths coexist, so the prior image still authenticates real users while you diagnose. Roll the consumer back, fix the cause (usually a missing or mis-ordered grant — re-check the grant-before-enforce ordering in lucas42/lucos_aithne#12 step 7), and re-flip when the next wave runs.
+
+> Sequencing and wave order are lucas42's call. This section just makes the abort path a written step rather than one improvised mid-incident.
