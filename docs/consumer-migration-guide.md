@@ -25,8 +25,6 @@ Each consumer gates access on a scope string (e.g. `photos:read`). Enumerate the
 
 Confirm the keepalive is shipped and deployed: aithne#181 (IdP session + re-mint endpoint) and the `lucos_navbar` release that closed lucas42/lucos_navbar#174. Consumers pin **`lucos_navbar >= 2.2.0`**. With it, human sessions stay alive while a tab is open — no per-form code, no 15-minute re-auth.
 
-> **Re-mint keepalive CORS needs no per-consumer step.** The keepalive's cross-origin `POST {AITHNE_ORIGIN}/auth/remint` is authorised for **any** `https://*.l42.eu` origin by an estate-wide origin-suffix glob in aithne (`remint.go` `setCORSHeaders`, ADR-0003 §2; lucas42/lucos_aithne#191). A consumer served from an `*.l42.eu` origin needs **no** CORS registration — no OIDC-client entry, no allow-list edit, nothing per-consumer. Non-`l42.eu` cross-origin requests are still rejected. (The earlier model that derived this allow-list from per-consumer OIDC-client `redirect_uri` values was removed in lucas42/lucos_aithne#191 — do not re-introduce it.)
-
 ### P3. `AITHNE_ORIGIN` convention
 
 Consumers take the aithne origin from an injected **`AITHNE_ORIGIN`** env var (deriving JWKS URL, issuer, audience and login-redirect from it) — never a hardcoded `https://aithne.l42.eu`. Set it **per environment**: development → the **dev** aithne instance (prod's `l42.eu`-domain `Secure` cookie never reaches `http://localhost`), production → prod aithne (lucas42/lucos_aithne#148).
