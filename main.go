@@ -902,6 +902,11 @@ type loginPageData struct {
 	Nonce string
 }
 
+// privacyPageData holds the per-request data injected into templates/privacy.html.
+type privacyPageData struct {
+	Nonce string
+}
+
 // accessDeniedPageData holds the per-request data for templates/access_denied.html.
 type accessDeniedPageData struct {
 	Nonce string
@@ -1172,6 +1177,27 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 	}
 }
 
+// handlePrivacyPage serves GET /privacy — the privacy information page.
+// No authentication required; the page is public.
+func handlePrivacyPage(tmplFS fs.FS) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFS(tmplFS, "templates/privacy.html"))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nonce, err := applyPageCSP(w)
+		if err != nil {
+			reqLogger(r).Printf("handlePrivacyPage: generate nonce: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		if err := tmpl.Execute(w, privacyPageData{Nonce: nonce}); err != nil {
+			reqLogger(r).Printf("handlePrivacyPage: render: %v", err)
+		}
+	}
+}
+
 // deriveRPID determines the WebAuthn RP ID from the APP_ORIGIN URL.
 //
 // In production (APP_ORIGIN = "https://aithne.l42.eu") the RP ID is set to
@@ -1353,6 +1379,9 @@ func main() {
 	// Shared stylesheet and JS helpers used by all aithne pages.
 	mux.HandleFunc("/aithne.css", serveStaticFile(staticFS, "static/aithne.css"))
 	mux.HandleFunc("/aithne.js", serveStaticFile(staticFS, "static/aithne.js"))
+
+	// Privacy information page — public, no auth required.
+	mux.HandleFunc("/privacy", handlePrivacyPage(templateFS))
 
 	// Passkey login page (HTML).
 	mux.HandleFunc("/auth/login", handleLoginPage(templateFS))
