@@ -25,11 +25,7 @@ Each consumer gates access on a scope string (e.g. `photos:read`). Enumerate the
 
 Confirm the keepalive is shipped and deployed: aithne#181 (IdP session + re-mint endpoint) and the `lucos_navbar` release that closed lucas42/lucos_navbar#174. Consumers pin **`lucos_navbar >= 2.2.0`**. With it, human sessions stay alive while a tab is open — no per-form code, no 15-minute re-auth.
 
-### P2b. Register each consumer as an OIDC client (CORS prerequisite for keepalive)
-
-For each consumer, register an OIDC client in the aithne admin panel (`aithne:admin` required) with `redirect_uri = {consumer-origin}/auth/callback`. aithne derives its **CORS allowlist** from the origins of registered OIDC clients' `redirect_uri` values, and the navbar keepalive's re-mint call is **cross-origin**: without the registration, the `OPTIONS {AITHNE_ORIGIN}/auth/remint` CORS preflight from the consumer's origin returns **403 Forbidden** and the keepalive silently fails — the session then dies at the 15-minute TTL despite P2 being in place.
-
-This registration is required **even for a consumer that uses JWKS-only verification** (no OIDC login flow of its own): it exists to put the consumer's origin on the CORS allowlist, not because the consumer runs an authorization-code flow. Discovered post-deploy for arachne (lucas42/lucos_arachne#676).
+> **Re-mint keepalive CORS needs no per-consumer step.** The keepalive's cross-origin `POST {AITHNE_ORIGIN}/auth/remint` is authorised for **any** `https://*.l42.eu` origin by an estate-wide origin-suffix glob in aithne (`remint.go` `setCORSHeaders`, ADR-0003 §2; lucas42/lucos_aithne#191). A consumer served from an `*.l42.eu` origin needs **no** CORS registration — no OIDC-client entry, no allow-list edit, nothing per-consumer. Non-`l42.eu` cross-origin requests are still rejected. (The earlier model that derived this allow-list from per-consumer OIDC-client `redirect_uri` values was removed in lucas42/lucos_aithne#191 — do not re-introduce it.)
 
 ### P3. `AITHNE_ORIGIN` convention
 
