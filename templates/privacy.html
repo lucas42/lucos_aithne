@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy — lucOS</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/aithne.css">
+</head>
+<body>
+  <lucos-navbar>Privacy</lucos-navbar>
+  <div class="card">
+    <h2>Cookies</h2>
+    <p>Aithne sets two cookies on <code>.l42.eu</code>:</p>
+    <ul>
+      <li><strong><code>aithne_session</code></strong> — a short-lived token (15 minutes) that proves you are signed in. lucOS services verify this token locally, without contacting Aithne on every request.</li>
+      <li><strong><code>aithne_idp_session</code></strong> — a longer-lived token (3 days) used only by Aithne itself to issue fresh session tokens without requiring another passkey prompt. It is restricted to the <code>/auth/remint</code> path and is never sent to other services.</li>
+    </ul>
+    <p>Both cookies are <code>HttpOnly</code> (not accessible to page JavaScript), <code>Secure</code> (sent only over HTTPS), and expire when the lifetime above is reached or when you sign out, whichever comes first.</p>
+
+    <h2>Passkey data</h2>
+    <p>When you register a passkey, your device generates a key pair. The private key stays on your device — Aithne never sees it. What Aithne stores:</p>
+    <ul>
+      <li>Your <strong>public key</strong></li>
+      <li>A <strong>credential identifier</strong> assigned by your device</li>
+      <li>A <strong>sign count</strong> — a counter that increments with each authentication, used to detect cloned credentials</li>
+      <li>An <strong>authenticator identifier</strong> (AAGUID) that indicates the make and model of your authenticator</li>
+    </ul>
+    <p>Your biometric data (fingerprint, face, PIN) never leaves your device. Aithne has no access to it.</p>
+
+    <h2>Sessions and revocation</h2>
+    <p>When you sign out, your IdP session is revoked and both cookies are cleared. Active 15-minute session tokens issued before sign-out may remain valid until they expire — this is by design (tokens are verified locally, without a round trip to Aithne).</p>
+    <p>If a passkey is revoked by an administrator, it can no longer be used to authenticate. Any existing sessions continue until they expire.</p>
+
+    <h2>Data deletion</h2>
+    <p>To request deletion of your account data, email <a href="mailto:data.privacy@l42.eu">data.privacy@l42.eu</a>.</p>
+
+    <p class="back-link"><a href="/">← Home</a></p>
+  </div>
+  <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
+</body>
+</html>
