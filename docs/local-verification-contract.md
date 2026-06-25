@@ -79,11 +79,33 @@ for what `/_info` must serve.
 
 ### 1. Fetch the public key set (JWKS)
 
-`GET https://aithne.l42.eu/.well-known/jwks.json`
+```
+GET {JWKS URL}
+```
 
-The response is a JWKS JSON object. Cache the key set (recommended TTL: 5 minutes).
-Refresh if a token's `kid` header is not found in the cache (the active key may have
-been rotated).
+The JWKS URL is, by default, `{AITHNE_ORIGIN}/.well-known/jwks.json` — derived from the
+`AITHNE_ORIGIN` config value (production: `https://aithne.l42.eu`). The response is a JWKS
+JSON object. Cache the key set (recommended TTL: 5 minutes). Refresh if a token's `kid`
+header is not found in the cache (the active key may have been rotated).
+
+**Optional `AITHNE_JWKS_URL` override — server-side fetch address only.** `AITHNE_ORIGIN`
+is *browser-facing*: it supplies the `iss` value checked in §4 and the login-redirect base.
+The JWKS fetch, by contrast, is *server-side* — issued from inside the consumer's container.
+In production the two addresses coincide and no override is needed. Where they diverge —
+chiefly local dev, where the browser reaches aithne at `localhost` but a bridge-network
+container cannot — consumers MUST support an optional `AITHNE_JWKS_URL` env var that:
+
+- **when set**, overrides the JWKS fetch URL **and nothing else** (it feeds *only* the
+  key-fetch call — e.g. `createRemoteJWKSet` / `jwk.Fetch`); point it at an
+  internally-reachable address (the concrete value is a per-environment config detail); and
+- **when unset**, defaults to `{AITHNE_ORIGIN}/.well-known/jwks.json`. It is **unset in
+  production** under normal circumstances.
+
+**Guard-rail.** `AITHNE_JWKS_URL` MUST NOT affect the `iss` validation in §4 or the
+unauthenticated-redirect target — both derive from `AITHNE_ORIGIN` only. `iss` is an
+exact-equality check against the value aithne *minted* into the token (the browser-facing
+origin); pointing the issuer check at an internal fetch address breaks verification of every
+legitimately-minted token.
 
 ### 2. Locate the signing key
 
@@ -117,7 +139,7 @@ EC public key bytes as the HMAC secret. The signing algorithm is fixed by this c
 
 | Check | Rule |
 |---|---|
-| `iss` | Must equal `https://aithne.l42.eu`. |
+| `iss` | Must equal `AITHNE_ORIGIN` (production: `https://aithne.l42.eu`). Always derived from `AITHNE_ORIGIN`, never from the `AITHNE_JWKS_URL` override — see §1. |
 | `aud` | Must contain `l42.eu`. |
 | `exp` | Must be in the future (with clock-skew tolerance — see §"Clock skew"). |
 | `iat` | Must be in the past (with clock-skew tolerance). |
