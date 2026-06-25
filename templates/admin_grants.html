@@ -196,7 +196,7 @@
         prompt.setAttribute('aria-label', 'Confirm: revoke this grant');
 
         const msg = document.createElement('p');
-        msg.textContent = "New sessions won’t include this scope. Active sessions may keep it for up to 15 min.";
+        msg.textContent = ‘Applies to new sessions immediately; active sessions within 15 min.’;
         prompt.appendChild(msg);
 
         const confirmBtn = document.createElement('button');
