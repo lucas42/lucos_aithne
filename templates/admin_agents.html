@@ -334,7 +334,7 @@
       if (secretPanel)        { secretPanel.hidden = true; }
     });
 
-    // ── Revoke machine key (inline confirm — agent loses access immediately) ──
+    // ── Revoke machine key (inline confirm — access is eventually-consistent) ──
     //
     // Event delegation on keysBody means re-rendered buttons (after Cancel)
     // are picked up automatically — no listener re-attachment needed.
@@ -361,7 +361,7 @@
         prompt.setAttribute('aria-label', 'Confirm: revoke this machine key');
 
         var msg = document.createElement('p');
-        msg.textContent = 'The agent loses access immediately.';
+        msg.textContent = "New tokens can't be minted. Already-issued sessions may keep the agent's access for up to 15 min.";
         prompt.appendChild(msg);
 
         var confirmBtn = document.createElement('button');
