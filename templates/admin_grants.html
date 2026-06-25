@@ -171,7 +171,7 @@
       window.location.href = u.toString();
     }
 
-    // ── Revoke (inline confirm — contact loses access immediately) ─────────────
+    // ── Revoke (inline confirm — eventually-consistent, up to 15 min propagation) ──
     //
     // Event delegation on grantsBody means re-rendered buttons (after Cancel)
     // are picked up automatically — no listener re-attachment needed.
@@ -196,7 +196,7 @@
         prompt.setAttribute('aria-label', 'Confirm: revoke this grant');
 
         const msg = document.createElement('p');
-        msg.textContent = 'The contact loses access to this scope immediately.';
+        msg.textContent = ‘Applies to new sessions immediately; active sessions within 15 min.’;
         prompt.appendChild(msg);
 
         const confirmBtn = document.createElement('button');

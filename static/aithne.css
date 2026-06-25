@@ -218,7 +218,7 @@ td:last-child { width: 1%; white-space: nowrap; }
 
 /* ── Inline confirm prompt ───────────────────────────────────────── */
 
-.confirm-row { display: flex; flex-wrap: wrap; gap: .375rem; align-items: center; }
+.confirm-row { display: flex; flex-wrap: wrap; gap: .375rem; align-items: center; white-space: normal; }
 .confirm-row p { font-size: .75rem; color: #c00; margin: 0; flex-basis: 100%; }
 .confirm-btn {
   display: inline-block; width: auto;
