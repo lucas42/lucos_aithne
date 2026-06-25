@@ -25,9 +25,18 @@ Each consumer gates access on a scope string (e.g. `photos:read`). Enumerate the
 
 Confirm the keepalive is shipped and deployed: aithne#181 (IdP session + re-mint endpoint) and the `lucos_navbar` release that closed lucas42/lucos_navbar#174. Consumers pin **`lucos_navbar >= 2.2.0`**. With it, human sessions stay alive while a tab is open — no per-form code, no 15-minute re-auth.
 
-### P3. `AITHNE_ORIGIN` convention
+### P3. `AITHNE_ORIGIN` convention (plus the optional `AITHNE_JWKS_URL` override)
 
-Consumers take the aithne origin from an injected **`AITHNE_ORIGIN`** env var (deriving JWKS URL, issuer, audience and login-redirect from it) — never a hardcoded `https://aithne.l42.eu`. Set it **per environment**: development → the **dev** aithne instance (prod's `l42.eu`-domain `Secure` cookie never reaches `http://localhost`), production → prod aithne (lucas42/lucos_aithne#148).
+Consumers take the aithne origin from an injected **`AITHNE_ORIGIN`** env var — never a hardcoded `https://aithne.l42.eu`. It is aithne's **single browser-facing identity** and the sole source of three things: the `iss` value checked during JWT validation, the login-redirect base (`{AITHNE_ORIGIN}/auth/login?next=…`), and — *by default* — the JWKS fetch URL (`{AITHNE_ORIGIN}/.well-known/jwks.json`). Set it **per environment**: development → the **dev** aithne instance (prod's `l42.eu`-domain `Secure` cookie never reaches `http://localhost`), production → prod aithne (lucas42/lucos_aithne#148).
+
+**Why an override is needed.** `AITHNE_ORIGIN` does double duty: *browser-facing* (issuer + login redirect) and *server-facing* (the consumer container fetches JWKS from it). In production the two coincide — `https://aithne.l42.eu` is reachable from browsers and from containers alike — so a single var suffices. In development they diverge: the browser reaches dev aithne at `localhost`, but from inside a bridge-network container `localhost` is the container's *own* loopback, so the JWKS fetch fails (`ECONNREFUSED`) and every token is rejected — a redirect loop back to login. (This affects the arachne canary too, by design; production is unaffected.)
+
+**The optional `AITHNE_JWKS_URL`.** Consumers support an **optional** `AITHNE_JWKS_URL` env var that overrides the JWKS fetch URL — *and nothing else*:
+
+- **Set** → feeds *only* the JWKS-fetch call; point it at an internally-reachable address (the concrete value is a per-environment detail settled at rollout, not part of this contract).
+- **Unset** → JWKS URL defaults to `{AITHNE_ORIGIN}/.well-known/jwks.json`. **Unset in production** under normal circumstances — origin and fetch coincide.
+
+**Guard-rail (normative — see local-verification-contract.md §1).** `AITHNE_JWKS_URL` MUST NOT influence the `iss` check or the `?next=` redirect; both continue to derive from `AITHNE_ORIGIN` only. `iss` is an exact-match against the value aithne *minted* (the browser-facing origin), and the redirect must land the user's *browser* somewhere it can reach — neither is a server-side fetch address. Wiring the override into the issuer check silently breaks validation of every legitimately-minted token.
 
 ## Per-consumer unit (applied across all consumers in the rollout)
 
@@ -51,7 +60,7 @@ Wire the two standard exemptions (ADR-0001 / contract doc): `/_info` is exempt f
 
 ### C3. Set `AITHNE_ORIGIN`
 
-Per P3: add it to `docker-compose.yml` (`environment:`, array syntax) and store the per-environment value in lucos_creds. Inject it into the navbar too, so its keepalive calls the right aithne.
+Per P3: add `AITHNE_ORIGIN` to `docker-compose.yml` (`environment:`, array syntax) and store the per-environment value in lucos_creds. Inject it into the navbar too, so its keepalive calls the right aithne. In environments where the container can't reach aithne at the `AITHNE_ORIGIN` address (chiefly local dev), also set the optional `AITHNE_JWKS_URL` (per P3) to an internally-reachable address; leave it unset in production.
 
 ### C4. Test the middleware
 
