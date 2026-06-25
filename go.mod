@@ -6,6 +6,8 @@ require (
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
+	github.com/tdewolff/parse/v2 v2.8.13
+	golang.org/x/net v0.56.0
 	modernc.org/sqlite v1.53.0
 )
 
