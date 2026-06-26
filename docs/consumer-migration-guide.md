@@ -52,9 +52,15 @@ Follow local-verification-contract.md §1–6 for the verification itself, then 
 
 1. **Valid token *and* required scope** → proceed.
 2. **Valid token, missing/wrong scope** → render **the consumer's own styled 403** (its existing error view). **Do not** redirect to login — the user is already signed in; re-login yields the same scopeless token and an infinite loop. There is **no** shared aithne "request access" endpoint. The 403 **must name the missing scope**, and surfaces are gated on the **capability the action requires** (not the HTTP method or route group) — see local-verification-contract.md §6 ("Gate on the capability…" and "Name the missing scope…") for the normative rules and constraints.
-3. **No token, or expired/invalid** → redirect to `{AITHNE_ORIGIN}/auth/login?next=…`.
+3. **No token, or expired/invalid** → redirect to `{AITHNE_ORIGIN}/auth/login?next=<full URL>`.
 
-   **Defense in depth — `?next=` open-redirect guard:** populate `next` from the current server-side request path (e.g. `req.path` or equivalent), never from a user-supplied query parameter. Reflecting a caller-controlled `?next=` value would allow an attacker to craft a login URL that redirects the user to an arbitrary external site after authentication. The `next` value must be an internal path only.
+   **`next` MUST be a full, absolute, same-origin URL — not a bare path.** Build it server-side from *your own* origin plus the current request path, then URL-encode it. The canonical example (`lucos_arachne` `explore/src/server/auth.js`) does exactly this: `` `${req.protocol}://${req.headers.host}${req.originalUrl}` `` (Django: `request.build_absolute_uri()`).
+
+   **Why a bare path gets stuck:** login happens on *aithne's* origin, and after authenticating aithne redirects the browser to whatever `next` holds. A bare path such as `/admin/` resolves *relative to aithne's origin* (`{AITHNE_ORIGIN}/admin/`), so the user lands back on **aithne**, never returns to your service, and the login round-trip never completes. Only an absolute URL on your own origin sends them back to the right place. (aithne accepts `next` when its host is `l42.eu` / `*.l42.eu`, or a `localhost` origin in development — see `redirect.go`'s `isAllowedRedirect`.)
+
+   **Open-redirect guard (still required):** derive `next` from the **server-side request**, never reflect a caller-supplied `?next=` query parameter — that would let an attacker craft a login URL that bounces the user to an arbitrary external site after authentication. Validate that the URL you assemble is your **own** origin before sending (Django: `url_has_allowed_host_and_scheme(url, allowed_hosts={request.get_host()}, require_https=request.is_secure())`, falling back to a safe default). aithne re-validates host-side, but the consumer must not emit an off-origin `next` in the first place.
+
+**Authorise on the scope alone — never on `principal_class`.** The access decision in all three branches above is the granted *scope*, applied **identically to every principal** (human or agent). `principal_class` (`human` / `agent`) is for **identity attribution only** — e.g. attaching a contact name for the navbar — and MUST NOT gate access. Gating on it both breaks the uniform model and wrongly closes the door to legitimately granting an agent a scope in production; default-deny by scope is the protection (ADR-0001 §6; `lucos_eolas` ADR-0002 §4).
 
 Wire the two standard exemptions (ADR-0001 / contract doc): `/_info` is exempt from auth, and the `render-ui` dev bypass.
 
