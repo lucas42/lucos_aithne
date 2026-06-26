@@ -165,6 +165,37 @@ principal (agent) would pass that check. Gate on one of:
 
 Both levers may be combined.
 
+#### Gate on the capability an action requires — not the HTTP method or route group
+
+Where a consumer reuses a **read/write capability split** (`<domain>:read` / `<domain>:write`)
+on a human UI, gate each **surface** on the capability its action actually requires — not on
+the HTTP method, and not on the file or route group that contains it:
+
+- A `GET` that renders a form whose submission needs `<domain>:write` is itself a **write**
+  surface and MUST require `<domain>:write`. A `:read`-only principal must never be able to
+  *access* a write form — otherwise they reach a form they can only fail to submit (a denial
+  after the fact, with no way forward).
+- A mutating verb (`POST`/`PUT`/`PATCH`/`DELETE`) that performs **no** mutation — e.g. a
+  navigation redirect — is a **read** surface; gate it on `<domain>:read`.
+- Where one route group serves both read and write handlers, gate **each handler and each
+  rendered form** on its own capability. Do not gate the whole group on the most privileged
+  capability (that denies reads to read-only principals), and do not leave write forms
+  reachable by principals who cannot submit them.
+
+```python
+# Python — one route group serving both; gate each handler on its own capability
+def view_album(scopes):        # read surface
+    require("media-metadata:read", scopes)
+def render_edit_form(scopes):  # GET that renders a write form → write surface
+    require("media-metadata:write", scopes)
+def delete_album(scopes):      # mutation → write surface
+    require("media-metadata:write", scopes)
+```
+
+This only bites where a genuine `:read`/`:write` split is exposed to a human UI; consumers
+that gate on a single `<domain>:use` scope are unaffected. The dev-only `render-ui` bypass
+below passes regardless of tier.
+
 #### Development-only `render-ui` bypass
 
 Consumers SHOULD accept the estate-wide `render-ui` scope as a pass **in development
@@ -190,6 +221,27 @@ if os.environ.get("ENVIRONMENT", "production") == "development" and "render-ui" 
 Because the guard is environment-scoped, a production deployment (`ENVIRONMENT` unset or
 `production`) ignores the `render-ui` scope entirely and falls through to the normal
 authorisation check.
+
+#### Name the missing scope in the denial response
+
+When an **otherwise-valid** token fails the authorisation check above (valid session, missing
+scope), deny the request with **HTTP 403** — distinct from the **401** for an invalid or
+expired token (§"Validation rules") — and **without** redirecting to login: re-authentication
+yields the same scopeless token, an infinite loop. The principal needs a grant, not a re-login.
+
+The 403 response (the consumer's own styled error page, or JSON for API callers) **MUST name
+the specific scope the principal lacks** — e.g. "This action requires the `photos:use` scope."
+This lets an operator grant access without first having to look up which scope gates the
+surface. For a read/write-split consumer (above), name the **tier the surface actually
+required** (`<domain>:read` vs `<domain>:write`).
+
+Constraints:
+
+- Name **only the required scope** — a server-side constant. Never echo a user-supplied value
+  into the response (response/log injection), and never enumerate the principal's *currently
+  granted* scopes (unnecessary, and marginally more disclosure than the grant flow needs).
+- This discloses nothing sensitive: the required scope is public vocabulary
+  (`lucos_auth_scopes`), and the 403 is shown only to an already-authenticated principal.
 
 ## Token TTL and clock skew
 

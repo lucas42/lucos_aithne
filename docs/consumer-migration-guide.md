@@ -51,7 +51,7 @@ Local verification only (no per-request call to aithne). Library varies by langu
 Follow local-verification-contract.md §1–6 for the verification itself, then structure request handling as a **three-branch** decision (the agreed estate-wide pattern, lucas42/lucos_arachne#657 Option 1):
 
 1. **Valid token *and* required scope** → proceed.
-2. **Valid token, missing/wrong scope** → render **the consumer's own styled 403** (its existing error view). **Do not** redirect to login — the user is already signed in; re-login yields the same scopeless token and an infinite loop. There is **no** shared aithne "request access" endpoint.
+2. **Valid token, missing/wrong scope** → render **the consumer's own styled 403** (its existing error view). **Do not** redirect to login — the user is already signed in; re-login yields the same scopeless token and an infinite loop. There is **no** shared aithne "request access" endpoint. The 403 **must name the missing scope**, and surfaces are gated on the **capability the action requires** (not the HTTP method or route group) — see local-verification-contract.md §6 ("Gate on the capability…" and "Name the missing scope…") for the normative rules and constraints.
 3. **No token, or expired/invalid** → redirect to `{AITHNE_ORIGIN}/auth/login?next=…`.
 
    **Defense in depth — `?next=` open-redirect guard:** populate `next` from the current server-side request path (e.g. `req.path` or equivalent), never from a user-supplied query parameter. Reflecting a caller-controlled `?next=` value would allow an attacker to craft a login URL that redirects the user to an arbitrary external site after authentication. The `next` value must be an internal path only.
