@@ -189,3 +189,48 @@ func TestTemplateScriptsSyntax(t *testing.T) {
 		})
 	}
 }
+
+// TestGrantsPickerTypeCoercion guards against the #224 regression class:
+// /admin/human-principals emits contact_id as a JSON string ("788") while
+// /admin/contacts emits id as a JSON number (788). Set.prototype.has uses
+// strict identity (SameValueZero), so without String() coercion on both
+// sides every has() call returns false and the datalist renders empty —
+// making name→ID resolution silently fail for every contact.
+//
+// This test renders admin_grants.html, extracts its inline script, and asserts
+// that both String() coercions are present. It cannot execute the JS (the
+// Go test suite has no runtime for that), but it provides a content guard:
+// if either coercion is removed, the test fails before the regression ships.
+func TestGrantsPickerTypeCoercion(t *testing.T) {
+	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, adminGrantsPageData{
+		Nonce:              "testnonce",
+		SessionToken:       "test.jwt.token",
+		Scopes:             []string{"aithne:admin"},
+		DefaultEnvironment: "development",
+	}); err != nil {
+		t.Fatalf("render admin_grants.html: %v", err)
+	}
+
+	scripts, err := extractInlineScripts(&buf)
+	if err != nil {
+		t.Fatalf("extract scripts: %v", err)
+	}
+	if len(scripts) == 0 {
+		t.Fatal("no inline scripts found in admin_grants.html — extraction broken")
+	}
+
+	combined := strings.Join(scripts, "\n")
+
+	// Both sides of the Set.has() comparison must be coerced to string.
+	// principal contact_id comes from the API as a JSON string; contact id
+	// comes as a JSON number — without these two coercions the filter always
+	// produces an empty result.
+	if !strings.Contains(combined, "String(p.contact_id)") {
+		t.Error("admin_grants.html: missing String(p.contact_id) coercion when building principalContactIds Set — contact_id type mismatch will break the picker")
+	}
+	if !strings.Contains(combined, "String(c.id)") {
+		t.Error("admin_grants.html: missing String(c.id) coercion in allContacts.filter() — contact id type mismatch will break the picker")
+	}
+}

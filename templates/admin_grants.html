@@ -142,16 +142,20 @@
         const allContacts = await contactsResp.json();
 
         // Build a Set of contact IDs that have an aithne principal.
+        // Coerce to string: /admin/human-principals emits contact_id as a JSON
+        // string ("788") while /admin/contacts emits id as a JSON number (788).
+        // Set.prototype.has uses strict identity, so without coercion every
+        // has() call returns false and the datalist renders empty.
         const principalContactIds = new Set();
         if (principalsResp.ok) {
           const principals = await principalsResp.json();
-          principals.forEach(function(p) { principalContactIds.add(p.contact_id); });
+          principals.forEach(function(p) { principalContactIds.add(String(p.contact_id)); });
         }
 
         // Keep only contacts that have a principal (or all contacts if the
         // principals endpoint failed, to preserve the existing fallback behaviour).
         contactsData = principalContactIds.size > 0
-          ? allContacts.filter(function(c) { return principalContactIds.has(c.id); })
+          ? allContacts.filter(function(c) { return principalContactIds.has(String(c.id)); })
           : allContacts;
 
         contactsData.forEach(function(c) {
