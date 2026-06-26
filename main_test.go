@@ -288,6 +288,7 @@ func newAdminMux(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
+	mux.HandleFunc("/admin/human-principals", requireAdminScope(s, testIssuer, listHumanPrincipals(s)))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, testIssuer, handleAdminInvites(s, contacts, testIssuer)))
 	mux.HandleFunc("/admin/invites/", requireAdminScope(s, testIssuer, handleAdminInviteByHash(s)))
 	return mux
@@ -5149,5 +5150,180 @@ func TestHandleAdminPrincipalActions_RevokeIDPSessions(t *testing.T) {
 	}
 	if n, ok := body["revoked"].(float64); !ok || n != 1 {
 		t.Errorf("expected revoked=1, got %v", body)
+	}
+}
+
+// --- /admin/human-principals list endpoint tests ---
+
+// newHumanPrincipalsMux builds a minimal test ServeMux for the human-principals endpoint.
+func newHumanPrincipalsMux(s *store.Store) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/human-principals", requireAdminScope(s, testIssuer, listHumanPrincipals(s)))
+	return mux
+}
+
+// TestAdminHumanPrincipals_Success verifies that the endpoint returns human
+// principals (not agents) with the correct contact_id and principal_id fields.
+//
+// Note: mintBearerToken also creates a human principal (the token-holder), so
+// the assertion checks that the specific contacts we added are present and that
+// the agent principal is absent — rather than asserting an exact count.
+func TestAdminHumanPrincipals_Success(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// Create two human principals and one agent principal (must be excluded from results).
+	humanA, err := s.CreatePrincipal(store.PrincipalClassHuman, "contact-alice")
+	if err != nil {
+		t.Fatalf("create human principal A: %v", err)
+	}
+	humanB, err := s.CreatePrincipal(store.PrincipalClassHuman, "contact-bob")
+	if err != nil {
+		t.Fatalf("create human principal B: %v", err)
+	}
+	if _, err := s.CreatePrincipal(store.PrincipalClassAgent, "lucos-some-agent"); err != nil {
+		t.Fatalf("create agent principal: %v", err)
+	}
+
+	// mintBearerToken also creates a human principal for the token holder.
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/human-principals", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newHumanPrincipalsMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	ct := rr.Header().Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected application/json, got %q", ct)
+	}
+	var got []humanPrincipalJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Build a map for order-independent assertions.
+	byContactID := map[string]humanPrincipalJSON{}
+	for _, p := range got {
+		byContactID[p.ContactID] = p
+	}
+	// alice and bob must be present with correct principal IDs.
+	for _, want := range []struct {
+		contactID   string
+		principalID string
+	}{
+		{"contact-alice", humanA.ID},
+		{"contact-bob", humanB.ID},
+	} {
+		p, ok := byContactID[want.contactID]
+		if !ok {
+			t.Errorf("missing entry for contact_id %q", want.contactID)
+			continue
+		}
+		if p.PrincipalID != want.principalID {
+			t.Errorf("contact %q: want principal_id %q, got %q", want.contactID, want.principalID, p.PrincipalID)
+		}
+	}
+	// The agent must NOT appear in the list.
+	if _, found := byContactID["lucos-some-agent"]; found {
+		t.Error("agent principal must not appear in human-principals list")
+	}
+}
+
+// TestAdminHumanPrincipals_ExcludesAgents verifies that an agent-only store
+// (plus the token-holder's human principal) returns only humans — i.e. agents
+// are never included regardless of how many exist.
+func TestAdminHumanPrincipals_ExcludesAgents(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// Add a couple of agent principals only.
+	if _, err := s.CreatePrincipal(store.PrincipalClassAgent, "lucos-agent-one"); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if _, err := s.CreatePrincipal(store.PrincipalClassAgent, "lucos-agent-two"); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	// mintBearerToken creates exactly one human principal (the admin token-holder).
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/human-principals", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newHumanPrincipalsMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var got []humanPrincipalJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	// Only the token-holder's principal should appear.
+	if len(got) != 1 {
+		t.Errorf("expected exactly 1 human principal (the token holder), got %d", len(got))
+	}
+	for _, p := range got {
+		if p.ContactID == "lucos-agent-one" || p.ContactID == "lucos-agent-two" {
+			t.Errorf("agent principal %q must not appear in human-principals list", p.ContactID)
+		}
+	}
+}
+
+// TestAdminHumanPrincipals_RequiresAdmin verifies that requests without the
+// aithne:admin scope are rejected with 403.
+func TestAdminHumanPrincipals_RequiresAdmin(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/human-principals", nil)
+	req.Header.Set("Authorization", "Bearer "+noAdminToken)
+	rr := httptest.NewRecorder()
+	newHumanPrincipalsMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+// TestAdminHumanPrincipals_MethodNotAllowed verifies that non-GET methods are rejected.
+func TestAdminHumanPrincipals_MethodNotAllowed(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodPost, "/admin/human-principals", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rr := httptest.NewRecorder()
+	newHumanPrincipalsMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rr.Code)
 	}
 }

@@ -1038,6 +1038,37 @@ func listAgents(s *store.Store) http.HandlerFunc {
 	}
 }
 
+// humanPrincipalJSON is the JSON shape returned by the human principals list endpoint.
+type humanPrincipalJSON struct {
+	ContactID   string `json:"contact_id"`
+	PrincipalID string `json:"principal_id"`
+}
+
+// listHumanPrincipals handles GET /admin/human-principals (with Authorization: Bearer).
+// Returns a JSON list of all human principals (each carrying their lucos_contacts
+// contact ID) so the grants picker can restrict itself to contacts that already
+// have an aithne principal record — avoiding dead-end "No principal found" errors.
+func listHumanPrincipals(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		principals, err := s.ListPrincipals(store.PrincipalClassHuman)
+		if err != nil {
+			reqLogger(r).Printf("listHumanPrincipals: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		result := make([]humanPrincipalJSON, 0, len(principals))
+		for _, p := range principals {
+			result = append(result, humanPrincipalJSON{ContactID: p.ExternalID, PrincipalID: p.ID})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
 // handleAgents serves /admin/agents.
 //
 // GET without an Authorization: Bearer header → HTML agent management page
@@ -1408,6 +1439,7 @@ func main() {
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, issuer, handleAdminContacts(contacts)))
+	mux.HandleFunc("/admin/human-principals", requireAdminScope(s, issuer, listHumanPrincipals(s)))
 	mux.HandleFunc("/admin/invites", requireAdminScope(s, issuer, handleAdminInvites(s, contacts, issuer)))
 	mux.HandleFunc("/admin/invites/", requireAdminScope(s, issuer, handleAdminInviteByHash(s)))
 	mux.HandleFunc("/admin/agents", handleAgents(s, vocab, issuer, environment))
