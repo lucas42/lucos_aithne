@@ -62,6 +62,17 @@ Wire the two standard exemptions (ADR-0001 / contract doc): `/_info` is exempt f
 
 Per P3: add `AITHNE_ORIGIN` to `docker-compose.yml` (`environment:`, array syntax) and store the per-environment value in lucos_creds. Inject it into the navbar too, so its keepalive calls the right aithne. In environments where the container can't reach aithne at the `AITHNE_ORIGIN` address (chiefly local dev), also set the optional `AITHNE_JWKS_URL` (per P3) to an internally-reachable address; leave it unset in production.
 
+**Use these exact lucos_creds values — not just "the dev aithne" in the abstract.** "dev → dev aithne" is satisfied by *any* address that resolves to an aithne, including the prod URL, so spell out the literal values to remove that ambiguity (a prod-URL slip on an earlier consumer is why this is concrete):
+
+| Env | `AITHNE_ORIGIN` | `AITHNE_JWKS_URL` |
+|---|---|---|
+| **development** | `http://localhost:8039` | `http://172.17.0.1:8039/.well-known/jwks.json` |
+| **production** | `https://aithne.l42.eu` | *(unset)* |
+
+- **`AITHNE_ORIGIN` is browser-facing** (issuer + login redirect), so in dev it must be the address the *browser* uses — `http://localhost:8039` (the prod `l42.eu`-domain `Secure` cookie never reaches `http://localhost`). It must **not** be `https://aithne.l42.eu` in dev.
+- **`AITHNE_JWKS_URL` is the server-side, in-container fetch address.** In dev the container cannot reach the browser-facing `localhost` (that's the container's own loopback), so it points at **`172.17.0.1`** — the default Docker bridge gateway to the host — on the same dev-aithne port `8039`. (Confirm the gateway if the daemon's default bridge is customised; `172.17.0.1` is the standard default.)
+- **In production both addresses coincide** (`https://aithne.l42.eu` is reachable from browsers and containers alike), so `AITHNE_JWKS_URL` is left **unset** and the JWKS URL defaults to `{AITHNE_ORIGIN}/.well-known/jwks.json`.
+
 ### C4. Test the middleware
 
 The auth path needs a **real token or a deliberate test double**, not a mock that asserts nothing about the real JWKS/verification interface. Exercise all three branches.
