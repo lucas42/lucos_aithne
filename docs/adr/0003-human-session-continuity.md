@@ -44,6 +44,8 @@ Many tabs each run the navbar; they must **not** all refresh independently. Coor
 
 ### 5. Optional: global submit-intercept (closes the wake-from-sleep race)
 
+> **Superseded — implemented, then removed. See [Amendment — 2026-06-26](#amendment--2026-06-26-submit-intercept-removed) below.** The submit-intercept was shipped in `lucos_navbar` and then removed because it caused two production bugs and could not reliably close the race it targeted. The submit-time freshness guarantee described here **no longer exists**; session continuity now rests entirely on §3 (the background keepalive).
+
 Timers don't fire while a laptop sleeps; a tab woken with an expired cookie has a narrow window before the focus-handler refresh completes. A **single, generic** `document.addEventListener('submit', …)` in the navbar that guarantees a fresh token before any submit proceeds closes this race — still central (one listener in the shared component, no per-form code). Recommended but separable.
 
 ## Consequences
@@ -60,7 +62,7 @@ Timers don't fire while a laptop sleeps; a tab woken with an expired cookie has 
 - **Two new aithne capabilities** (IdP session + re-mint endpoint) and **non-trivial navbar logic** (keepalive timer, focus handler, multi-tab coordination, optional submit-intercept). Materially more than "bump a TTL".
 - **A new session layer to revoke.** The IdP session is a longer-lived artefact; revoking a *principal* must invalidate it (the re-mint endpoint re-checks principal validity, so the next re-mint fails — but a still-valid access token persists ≤15 min). Operators now reason about two layers (access token ≤15 min; IdP session up to its cap); reflect this in the credential-compromise runbook.
 - **Cross-site credentialed fetch + `Set-Cookie` reliance.** Depends on the cookie/CORS model (`SameSite=None; Secure`; per-origin CORS allow-list). #148's dev→dev + `AITHNE_ORIGIN` settles this; if that model changed, the keepalive breaks.
-- **The wake-from-sleep race** persists unless the submit-intercept (§5) is implemented; without it, a tab woken past expiry can still drop one POST in a narrow window.
+- **The wake-from-sleep race** is an accepted residual risk. The §5 submit-intercept that would have closed it was implemented and then removed (see [Amendment — 2026-06-26](#amendment--2026-06-26-submit-intercept-removed)); a tab woken past expiry can still drop one POST in the narrow window before the focus/visibility remint completes. This is the standing state, not a conditional one.
 - **Idle-with-tab-open extends the session** to the IdP-session cap (the keepalive refreshes even an idle tab). Conventional, but it means "tab open" ≈ "session alive"; the IdP-session cap is the backstop.
 
 ## Amendment — 2026-06-23: CORS allow-list changed to `*.l42.eu` origin glob
@@ -78,6 +80,21 @@ The initial implementation of §2 derived the re-mint CORS allow-list from regis
 - The principal is synchronously re-validated on every call; scope revocation takes effect within one re-mint interval.
 
 **Load-bearing constraint:** The glob is safe *only while `/auth/remint` remains harmless-if-forged*. Any future change adding a readable response body, an externally-observable side-effect, or any capability extractable across the CORS boundary **must tighten the CORS policy before shipping**. This constraint is recorded in the `remint.go` package-level comment and must survive any future refactor of that file.
+
+## Amendment — 2026-06-26: submit-intercept removed
+
+This amends §5 (and the related wake-from-sleep bullet in Consequences → Negative).
+
+**PR:** lucas42/lucos_navbar#183 (removal) — supersedes lucas42/lucos_navbar#182's `_blank` workaround. **Decided by:** lucas42.
+
+§5 proposed an *optional, separable* global `submit` listener in the navbar to close the wake-from-sleep race by guaranteeing a fresh token before any submit fired. It was implemented in `keepalive.js`, but is now **removed entirely**. Two production bugs traced to the same interceptor:
+
+- **Stale-form save hang (`lucos_media_metadata_manager`).** After ≥15 min idle (machine sleep being the common trigger), the interceptor called `preventDefault()` and `await tryRemint()`. The `fetch()` had no timeout, so on wake — when the network interface is briefly unavailable — it hung indefinitely and the form never navigated. Worse, the §5 guarantee was illusory even on the happy path: when the remint completed but *failed* (401, session genuinely expired), the submit still fired with the expired cookie and the server redirected to login anyway. The intercept gave no protection in the very case it existed for.
+- **`target="_blank"` regression (`lucos_media_seinn`).** The `await` lost the transient user-activation, so `_blank` form submissions dropped their new-tab navigation. PR #182 patched this with a `_blank` skip; that skip is now dead code and is removed too.
+
+**Decision:** Remove the submit-intercept. Session continuity rests entirely on §3 — the background timer (every 10 min), the `visibilitychange`/`focus` remints, and the cross-tab `BroadcastChannel` coordination, all of which remain. The §3 mechanism is what keeps the `aithne_session` cookie fresh at submit time under normal use; the structural resolution of the POST-data-loss journey (Consequences → Positive) is unchanged by this removal.
+
+**What this costs:** the wake-from-sleep edge (a tab woken past expiry, submitting before the focus remint lands) is no longer closed — it reverts to an **accepted residual risk** (see the amended Consequences → Negative bullet). This was judged the right trade because the intercept could not reliably close that race even when working as designed, while reliably introducing two failure modes of its own. A bounded, timed remint with explicit failure handling would be the precondition for ever reintroducing a submit-time guarantee; absent that, no submit-time freshness is promised.
 
 ## Follow-up (implementation — tracked separately)
 
