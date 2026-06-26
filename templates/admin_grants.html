@@ -124,14 +124,36 @@
     // ── Contact name search ──────────────────────────────────────────────────
     let contactsData = [];
 
-    // Fetch the contact list and populate the <datalist> for name-search.
+    // Fetch the contact list and the set of known human principals, then
+    // populate the <datalist> with only the contacts that already have an
+    // aithne principal record.  This avoids dead-end "No principal found"
+    // errors for contacts who have not yet enrolled.
     (async function loadContacts() {
       try {
-        const resp = await fetch('/admin/contacts', {
-          headers: { 'Authorization': 'Bearer ' + sessionToken },
-        });
-        if (!resp.ok) return;
-        contactsData = await resp.json();
+        const [contactsResp, principalsResp] = await Promise.all([
+          fetch('/admin/contacts', {
+            headers: { 'Authorization': 'Bearer ' + sessionToken },
+          }),
+          fetch('/admin/human-principals', {
+            headers: { 'Authorization': 'Bearer ' + sessionToken },
+          }),
+        ]);
+        if (!contactsResp.ok) return;
+        const allContacts = await contactsResp.json();
+
+        // Build a Set of contact IDs that have an aithne principal.
+        const principalContactIds = new Set();
+        if (principalsResp.ok) {
+          const principals = await principalsResp.json();
+          principals.forEach(function(p) { principalContactIds.add(p.contact_id); });
+        }
+
+        // Keep only contacts that have a principal (or all contacts if the
+        // principals endpoint failed, to preserve the existing fallback behaviour).
+        contactsData = principalContactIds.size > 0
+          ? allContacts.filter(function(c) { return principalContactIds.has(c.id); })
+          : allContacts;
+
         contactsData.forEach(function(c) {
           const opt = document.createElement('option');
           opt.value = c.name;
