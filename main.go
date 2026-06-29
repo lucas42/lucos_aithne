@@ -727,7 +727,7 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 func handleGrants(s *store.Store, vocab *store.Vocabulary, issuer, environment string, contacts *contactsClient) http.HandlerFunc {
 	htmlPage := requireAdminScopeFromCookie(s, issuer, adminGrantsPage(s, vocab, environment, contacts))
 	jsonList := requireAdminScope(s, issuer, listGrants(s))
-	jsonCreate := requireAdminScope(s, issuer, createGrant(s, vocab))
+	jsonCreate := requireAdminScope(s, issuer, createGrant(s, vocab, environment))
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -772,22 +772,26 @@ func listGrants(s *store.Store) http.HandlerFunc {
 }
 
 // createGrantRequest is the POST body for creating a grant.
+// The Environment field is accepted but ignored — environment is stamped
+// server-side from the instance ENVIRONMENT variable (see createGrant).
 type createGrantRequest struct {
 	PrincipalID string `json:"principal_id"`
 	Scope       string `json:"scope"`
-	Environment string `json:"environment"`
+	Environment string `json:"environment"` // ignored; retained for backward-compatible form POSTs
 }
 
-// createGrant handles POST /admin/grants.
-func createGrant(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
+// createGrant handles POST /admin/grants. The environment is derived from the
+// instance ENVIRONMENT at startup, not from the request body, so a caller
+// cannot stamp a foreign environment onto a grant.
+func createGrant(s *store.Store, vocab *store.Vocabulary, environment string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createGrantRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "400 Bad Request — invalid JSON body", http.StatusBadRequest)
 			return
 		}
-		if req.PrincipalID == "" || req.Scope == "" || req.Environment == "" {
-			http.Error(w, "400 Bad Request — principal_id, scope, and environment are required", http.StatusBadRequest)
+		if req.PrincipalID == "" || req.Scope == "" {
+			http.Error(w, "400 Bad Request — principal_id and scope are required", http.StatusBadRequest)
 			return
 		}
 
@@ -796,7 +800,9 @@ func createGrant(s *store.Store, vocab *store.Vocabulary) http.HandlerFunc {
 		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
 		grantedBy := claims.Subject
 
-		g, err := s.CreateGrant(req.PrincipalID, req.Scope, req.Environment, grantedBy, vocab)
+		// environment is the instance-level value passed at handler construction
+		// time; any environment field in the request body is silently ignored.
+		g, err := s.CreateGrant(req.PrincipalID, req.Scope, environment, grantedBy, vocab)
 		if errors.Is(err, store.ErrUnknownScope) {
 			http.Error(w, "400 Bad Request — unknown scope (not in vocabulary)", http.StatusBadRequest)
 			return
