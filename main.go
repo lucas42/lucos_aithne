@@ -425,6 +425,32 @@ func credentialToJSON(c *store.Credential) credentialJSON {
 	return j
 }
 
+// scopeStatusData represents a single scope in the per-scope grant list rendered
+// by the admin pages.  It tells the template whether the scope is actively
+// granted and, if so, supplies the grant ID required to revoke it.
+type scopeStatusData struct {
+	Scope   string
+	Granted bool   // true when an active (non-revoked) grant exists
+	GrantID string // the grant's ID; empty when Granted is false
+}
+
+// buildScopeStatuses returns one entry per scope in the vocabulary, annotated
+// with whether an active (non-revoked) grant exists in the supplied grants list.
+func buildScopeStatuses(scopes []string, grants []grantJSON) []scopeStatusData {
+	active := make(map[string]string, len(grants))
+	for _, g := range grants {
+		if g.RevokedAt == nil {
+			active[g.Scope] = g.ID
+		}
+	}
+	statuses := make([]scopeStatusData, len(scopes))
+	for i, sc := range scopes {
+		id, granted := active[sc]
+		statuses[i] = scopeStatusData{Scope: sc, Granted: granted, GrantID: id}
+	}
+	return statuses
+}
+
 // grantJSON is the JSON representation of a grant returned by admin endpoints.
 type grantJSON struct {
 	ID          string  `json:"id"`
@@ -655,7 +681,7 @@ func handleAdminPrincipalActions(s *store.Store) http.HandlerFunc {
 // without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
 // Contact ID lookup and grant listing are server-rendered; grant creation and revocation
 // are performed by the embedded JavaScript using the session token for AJAX auth.
-func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string, contacts *contactsClient) http.HandlerFunc {
+func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, environment string, contacts *contactsClient) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
 	scopes := vocab.All()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -669,15 +695,12 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 		}
 		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
 		data := adminGrantsPageData{
-			Nonce:              nonce,
-			SessionToken:       sessionToken,
-			Scopes:             scopes,
-			DefaultEnvironment: defaultEnv,
+			Nonce:        nonce,
+			SessionToken: sessionToken,
 		}
 		contactID := r.URL.Query().Get("contact_id")
 		if contactID != "" {
 			data.ContactID = contactID
-			envFilter := r.URL.Query().Get("environment")
 			p, perr := s.GetPrincipalByExternalID(store.PrincipalClassHuman, contactID)
 			if errors.Is(perr, store.ErrNotFound) {
 				data.LookupError = fmt.Sprintf("No principal found for contact ID %q.", contactID)
@@ -696,15 +719,18 @@ func adminGrantsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string,
 					data.ContactDisplayName = contactID
 					// ContactNameAvailable stays false — template shows degradation hint
 				}
-				grants, gerr := s.ListGrants(p.ID, envFilter, true)
+				// Fetch only active grants for the instance environment; revoked
+				// or foreign-environment rows have no bearing on the scope status list.
+				grants, gerr := s.ListGrants(p.ID, environment, true)
 				if gerr != nil {
 					reqLogger(r).Printf("adminGrantsPage: list grants for principal %q: %v", p.ID, gerr)
 					data.LookupError = "Could not load grants. Try again."
 				} else {
-					data.Grants = make([]grantJSON, 0, len(grants))
+					grantJSONs := make([]grantJSON, 0, len(grants))
 					for _, g := range grants {
-						data.Grants = append(data.Grants, grantToJSON(g))
+						grantJSONs = append(grantJSONs, grantToJSON(g))
 					}
+					data.ScopeStatuses = buildScopeStatuses(scopes, grantJSONs)
 				}
 			}
 		}
@@ -930,34 +956,30 @@ type homePageData struct {
 // adminGrantsPageData holds the per-request data for templates/admin_grants.html.
 type adminGrantsPageData struct {
 	Nonce                string
-	SessionToken         string     // raw JWT — embedded for AJAX calls (HttpOnly cookie inaccessible to JS)
-	Scopes               []string   // sorted vocabulary for the scope <select>
-	DefaultEnvironment   string     // pre-fills the environment field
-	ContactID            string     // what the admin searched for
-	ContactDisplayName   string     // display name from lucos_contacts; falls back to ContactID on error
-	ContactNameAvailable bool       // false when contacts lookup failed and ContactDisplayName is the raw contact ID
-	PrincipalID          string     // resolved UUID, empty when not yet looked up or not found
-	Grants               []grantJSON
-	LookupError          string     // e.g. "contact not found"
+	SessionToken         string          // raw JWT — embedded for AJAX calls (HttpOnly cookie inaccessible to JS)
+	ScopeStatuses        []scopeStatusData // per-scope granted/not-granted list for the redesigned UI
+	ContactID            string          // what the admin searched for
+	ContactDisplayName   string          // display name from lucos_contacts; falls back to ContactID on error
+	ContactNameAvailable bool            // false when contacts lookup failed and ContactDisplayName is the raw contact ID
+	PrincipalID          string          // resolved UUID, empty when not yet looked up or not found
+	LookupError          string          // e.g. "contact not found"
 }
 
 // adminAgentsPageData holds the per-request data for templates/admin_agents.html.
 type adminAgentsPageData struct {
-	Nonce              string
-	SessionToken       string          // raw JWT — embedded for AJAX calls
-	Scopes             []string        // sorted vocabulary for the grant scope <select>
-	DefaultEnvironment string          // pre-fills the environment field
-	Slug               string          // agent slug searched for (URL ?slug=X)
-	PrincipalID        string          // resolved UUID; empty when not yet searched or not found
-	Credentials        []credentialJSON // machine keys for this agent (all, including revoked)
-	Grants             []grantJSON     // grants for this agent
-	LookupError        string          // e.g. "agent not found"
+	Nonce         string
+	SessionToken  string           // raw JWT — embedded for AJAX calls
+	ScopeStatuses []scopeStatusData // per-scope granted/not-granted list for the redesigned UI
+	Slug          string           // agent slug searched for (URL ?slug=X)
+	PrincipalID   string           // resolved UUID; empty when not yet searched or not found
+	Credentials   []credentialJSON // machine keys for this agent (all, including revoked)
+	LookupError   string           // e.g. "agent not found"
 }
 
 // adminAgentsPage serves the browser-facing agent management UI (GET /admin/agents
 // without an Authorization header). It must be wrapped by requireAdminScopeFromCookie.
 // ?slug=X resolves the agent principal server-side and populates the page.
-func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string) http.HandlerFunc {
+func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, environment string) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_agents.html"))
 	scopes := vocab.All()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -969,10 +991,8 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 		}
 		sessionToken, _ := r.Context().Value(rawTokenContextKey).(string)
 		data := adminAgentsPageData{
-			Nonce:              nonce,
-			SessionToken:       sessionToken,
-			Scopes:             scopes,
-			DefaultEnvironment: defaultEnv,
+			Nonce:        nonce,
+			SessionToken: sessionToken,
 		}
 		slug := r.URL.Query().Get("slug")
 		if slug != "" {
@@ -997,15 +1017,18 @@ func adminAgentsPage(s *store.Store, vocab *store.Vocabulary, defaultEnv string)
 						}
 					}
 				}
-				grants, gerr := s.ListGrants(p.ID, "", false)
+				// Fetch only active grants for the instance environment; revoked
+				// or foreign-environment rows have no bearing on the scope status list.
+				grants, gerr := s.ListGrants(p.ID, environment, true)
 				if gerr != nil {
 					reqLogger(r).Printf("adminAgentsPage: list grants for %q: %v", slug, gerr)
 					data.LookupError = "Could not load grants. Try again."
 				} else {
-					data.Grants = make([]grantJSON, 0, len(grants))
+					grantJSONs := make([]grantJSON, 0, len(grants))
 					for _, g := range grants {
-						data.Grants = append(data.Grants, grantToJSON(g))
+						grantJSONs = append(grantJSONs, grantToJSON(g))
 					}
+					data.ScopeStatuses = buildScopeStatuses(scopes, grantJSONs)
 				}
 			}
 		}

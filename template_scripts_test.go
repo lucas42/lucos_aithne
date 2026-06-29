@@ -124,20 +124,24 @@ func TestTemplateScriptsSyntax(t *testing.T) {
 			// The template that contained the #211 smart-quote regression.
 			tmpl: "templates/admin_grants.html",
 			data: adminGrantsPageData{
-				Nonce:              nonce,
-				SessionToken:       "test.jwt.token",
-				Scopes:             []string{"arachne:read", "aithne:admin"},
-				DefaultEnvironment: "development",
+				Nonce:        nonce,
+				SessionToken: "test.jwt.token",
+				ScopeStatuses: []scopeStatusData{
+					{Scope: "arachne:read", Granted: true, GrantID: "grant-abc"},
+					{Scope: "aithne:admin", Granted: false},
+				},
 			},
 		},
 		{
 			name: "admin_agents.html",
 			tmpl: "templates/admin_agents.html",
 			data: adminAgentsPageData{
-				Nonce:              nonce,
-				SessionToken:       "test.jwt.token",
-				Scopes:             []string{"arachne:read", "aithne:admin"},
-				DefaultEnvironment: "development",
+				Nonce:        nonce,
+				SessionToken: "test.jwt.token",
+				ScopeStatuses: []scopeStatusData{
+					{Scope: "arachne:read", Granted: true, GrantID: "grant-abc"},
+					{Scope: "aithne:admin", Granted: false},
+				},
 			},
 		},
 		{
@@ -205,10 +209,11 @@ func TestGrantsPickerTypeCoercion(t *testing.T) {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/admin_grants.html"))
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, adminGrantsPageData{
-		Nonce:              "testnonce",
-		SessionToken:       "test.jwt.token",
-		Scopes:             []string{"aithne:admin"},
-		DefaultEnvironment: "development",
+		Nonce:        "testnonce",
+		SessionToken: "test.jwt.token",
+		ScopeStatuses: []scopeStatusData{
+			{Scope: "aithne:admin", Granted: false},
+		},
 	}); err != nil {
 		t.Fatalf("render admin_grants.html: %v", err)
 	}

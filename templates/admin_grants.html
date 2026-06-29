@@ -37,64 +37,33 @@
       {{if .LookupError}}
         <div class="error" role="alert">{{.LookupError}}</div>
       {{else}}
-        <h2 id="grantsHeading">Grants for <strong>{{.ContactDisplayName}}</strong>{{if not .ContactNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}} ({{.ContactID}})</h2>
-        {{if .Grants}}
-        <table aria-labelledby="grantsHeading">
-          <thead>
-            <tr>
-              <th scope="col">Scope</th>
-              <th scope="col">Environment</th>
-              <th scope="col">Granted by</th>
-              <th scope="col">Granted at</th>
-              <th scope="col"><span class="sr-only">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody id="grantsBody">
-            {{range .Grants}}
-            <tr id="grant-{{.ID}}">
-              <td>{{.Scope}}</td>
-              <td>{{.Environment}}</td>
-              <td>{{if eq .GrantedBy $.ContactID}}{{$.ContactDisplayName}}{{if not $.ContactNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}{{else}}{{.GrantedBy}}{{end}}</td>
-              <td>{{.GrantedAt}}</td>
-              <td>
-                {{if not .RevokedAt}}
-                <button class="revoke-btn"
-                        data-grant-id="{{.ID}}"
-                        aria-label="Revoke {{.Scope}} ({{.Environment}})">Revoke</button>
-                {{else}}
-                <span class="status-revoked" title="Revoked {{.RevokedAt}}">Revoked</span>
-                {{end}}
-              </td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
-        {{else}}
-        <p class="empty" id="emptyMsg">No active grants.</p>
-        {{end}}
+        <h2 id="scopesHeading">Scopes for <strong>{{.ContactDisplayName}}</strong>{{if not .ContactNameAvailable}} <span class="name-unavailable">(name unavailable)</span>{{end}}</h2>
 
-        <hr class="section-sep">
-        <p class="grant-form-heading">Grant a scope</p>
-        <form id="grantForm" novalidate>
-          <div class="field-group">
-            <label for="scopeSelect">Scope</label>
-            <select id="scopeSelect" name="scope">
-              {{range .Scopes}}
-              <option value="{{.}}">{{.}}</option>
+        <ul class="scope-list" id="scopeList" aria-labelledby="scopesHeading">
+          {{range .ScopeStatuses}}
+          <li class="scope-row" id="scope-row-{{.Scope}}" data-scope="{{.Scope}}">
+            <span class="scope-name">{{.Scope}}</span>
+            <span class="scope-status-cell">
+              {{if .Granted}}
+                <span class="status-active">Granted</span>
+              {{else}}
+                <span class="status-not-granted">Not granted</span>
               {{end}}
-            </select>
-          </div>
-          <div class="field-row">
-            <div>
-              <label for="envInput">Environment</label>
-              <input type="text" id="envInput" name="environment"
-                     value="{{.DefaultEnvironment}}"
-                     placeholder="e.g. production"
-                     autocomplete="off" required>
-            </div>
-            <button type="submit" id="grantBtn">Grant scope</button>
-          </div>
-        </form>
+            </span>
+            <span class="scope-action-cell">
+              {{if .Granted}}
+                <button class="revoke-btn"
+                        data-grant-id="{{.GrantID}}"
+                        aria-label="Revoke {{.Scope}}">Revoke</button>
+              {{else}}
+                <button class="grant-btn"
+                        data-scope="{{.Scope}}"
+                        aria-label="Grant {{.Scope}}">Grant</button>
+              {{end}}
+            </span>
+          </li>
+          {{end}}
+        </ul>
       {{end}}
     {{end}}
   </div>
@@ -190,61 +159,115 @@
       }
     });
 
-    // Reload preserving the current contact_id query param.
-    function reloadPage() {
-      const u = new URL(window.location.href);
-      u.searchParams.set('contact_id', contactId);
-      window.location.href = u.toString();
-    }
-
-    // ── Revoke (inline confirm — eventually-consistent, up to 15 min propagation) ──
+    // ── Per-scope grant / revoke ─────────────────────────────────────────────
     //
-    // Event delegation on grantsBody means re-rendered buttons (after Cancel)
-    // are picked up automatically — no listener re-attachment needed.
-    const grantsBody = document.getElementById('grantsBody');
-    if (grantsBody) {
-      grantsBody.addEventListener('click', async function(e) {
-        const btn = e.target.closest('button[data-grant-id]');
-        if (!btn) return;
+    // Uses event delegation on the scope list so dynamically added buttons
+    // (inserted after a successful grant or revoke) are handled automatically
+    // without re-attaching listeners.
+    var scopeList = document.getElementById('scopeList');
+    if (scopeList) {
+      scopeList.addEventListener('click', async function(e) {
 
-        const grantId = btn.dataset.grantId;
-        const cell = btn.closest('td');
-        if (!cell) return;
+        // ── Grant button ───────────────────────────────────────────────────
+        var grantBtn = e.target.closest('button.grant-btn');
+        if (grantBtn) {
+          var scope      = grantBtn.dataset.scope;
+          var row        = grantBtn.closest('.scope-row');
+          var statusCell = row ? row.querySelector('.scope-status-cell') : null;
+          var actionCell = grantBtn.closest('.scope-action-cell');
+          if (!scope || !row || !actionCell || !principalId) return;
+          clearError();
+
+          grantBtn.setAttribute('aria-disabled', 'true');
+          grantBtn.textContent = 'Granting…';
+          try {
+            var resp = await fetch('/admin/grants', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + sessionToken,
+              },
+              body: JSON.stringify({ principal_id: principalId, scope: scope }),
+            });
+            if (!resp.ok) {
+              var text = await resp.text();
+              if (resp.status === 401 || resp.status === 403) {
+                showError('Access denied. Your session may have expired — sign out and back in.');
+              } else if (resp.status === 409) {
+                showError('\u2018' + scope + '\u2019 is already granted.');
+              } else if (resp.status === 404) {
+                showError('Principal not found. Try looking up a different contact.');
+              } else {
+                showError('Could not grant scope: ' + text.trim());
+              }
+              grantBtn.removeAttribute('aria-disabled');
+              grantBtn.textContent = 'Grant';
+              return;
+            }
+            var data = await resp.json();
+            // Update the row in-place — no page reload needed.
+            if (statusCell) {
+              statusCell.innerHTML = '<span class="status-active">Granted</span>';
+            }
+            actionCell.innerHTML = '';
+            var revokeBtn = document.createElement('button');
+            revokeBtn.type = 'button';
+            revokeBtn.className = 'revoke-btn';
+            revokeBtn.dataset.grantId = data.id;
+            revokeBtn.setAttribute('aria-label', 'Revoke ' + scope);
+            revokeBtn.textContent = 'Revoke';
+            actionCell.appendChild(revokeBtn);
+          } catch (_) {
+            showError('Something went wrong. Try again.');
+            grantBtn.removeAttribute('aria-disabled');
+            grantBtn.textContent = 'Grant';
+          }
+          return;
+        }
+
+        // ── Revoke button (inline confirm) ────────────────────────────────
+        var revokeBtn = e.target.closest('button.revoke-btn[data-grant-id]');
+        if (!revokeBtn) return;
+
+        var grantId    = revokeBtn.dataset.grantId;
+        var row        = revokeBtn.closest('.scope-row');
+        var scope      = row ? row.dataset.scope : '';
+        var actionCell = revokeBtn.closest('.scope-action-cell');
+        if (!actionCell) return;
 
         // Preserve original button so Cancel can restore it exactly.
-        const origBtn = btn.cloneNode(true);
+        var origBtn = revokeBtn.cloneNode(true);
 
         // Replace the Revoke button with an inline confirm prompt.
-        cell.innerHTML = '';
-        const prompt = document.createElement('div');
+        actionCell.innerHTML = '';
+        var prompt = document.createElement('div');
         prompt.className = 'confirm-row';
         prompt.setAttribute('role', 'group');
-        prompt.setAttribute('aria-label', 'Confirm: revoke this grant');
+        prompt.setAttribute('aria-label', 'Confirm: revoke ' + scope);
 
-        const msg = document.createElement('p');
+        var msg = document.createElement('p');
         msg.textContent = 'Applies to new sessions immediately; active sessions within 15 min.';
         prompt.appendChild(msg);
 
-        const confirmBtn = document.createElement('button');
+        var confirmBtn = document.createElement('button');
         confirmBtn.type = 'button';
         confirmBtn.className = 'confirm-btn';
         confirmBtn.textContent = 'Confirm revoke';
         prompt.appendChild(confirmBtn);
 
-        const cancelBtn = document.createElement('button');
+        var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'cancel-btn';
         cancelBtn.textContent = 'Cancel';
         prompt.appendChild(cancelBtn);
 
-        cell.appendChild(prompt);
+        actionCell.appendChild(prompt);
         confirmBtn.focus();
 
         // Cancel: restore the original Revoke button.
-        // Event delegation picks it back up automatically.
         cancelBtn.addEventListener('click', function() {
-          cell.innerHTML = '';
-          cell.appendChild(origBtn);
+          actionCell.innerHTML = '';
+          actionCell.appendChild(origBtn);
         });
 
         // Confirm: DELETE /admin/grants/{id}.
@@ -254,14 +277,14 @@
           confirmBtn.textContent = 'Revoking…';
           cancelBtn.setAttribute('aria-disabled', 'true');
           try {
-            const resp = await fetch('/admin/grants/' + encodeURIComponent(grantId), {
+            var resp = await fetch('/admin/grants/' + encodeURIComponent(grantId), {
               method: 'DELETE',
               headers: { 'Authorization': 'Bearer ' + sessionToken },
             });
             if (!resp.ok) {
-              const text = await resp.text();
-              cell.innerHTML = '';
-              cell.appendChild(origBtn);
+              var text = await resp.text();
+              actionCell.innerHTML = '';
+              actionCell.appendChild(origBtn);
               if (resp.status === 401 || resp.status === 403) {
                 showError('Access denied. Your session may have expired — sign out and back in.');
               } else if (resp.status === 409) {
@@ -271,63 +294,25 @@
               }
               return;
             }
-            // Swap confirm prompt for a revoked badge in-place — keeps the row
-            // visible and consistent with what the page shows on a fresh load.
-            cell.innerHTML = '<span class="status-revoked">Revoked</span>';
+            // Update the row in-place — no page reload needed.
+            var statusCell = row ? row.querySelector('.scope-status-cell') : null;
+            if (statusCell) {
+              statusCell.innerHTML = '<span class="status-not-granted">Not granted</span>';
+            }
+            actionCell.innerHTML = '';
+            var newGrantBtn = document.createElement('button');
+            newGrantBtn.type = 'button';
+            newGrantBtn.className = 'grant-btn';
+            newGrantBtn.dataset.scope = scope;
+            newGrantBtn.setAttribute('aria-label', 'Grant ' + scope);
+            newGrantBtn.textContent = 'Grant';
+            actionCell.appendChild(newGrantBtn);
           } catch (_) {
-            cell.innerHTML = '';
-            cell.appendChild(origBtn);
+            actionCell.innerHTML = '';
+            actionCell.appendChild(origBtn);
             showError('Something went wrong. Try again.');
           }
         });
-      });
-    }
-
-    // ── Grant ──────────────────────────────────────────────────────────────────
-    const grantForm = document.getElementById('grantForm');
-    if (grantForm) {
-      const grantBtn = document.getElementById('grantBtn');
-      grantForm.addEventListener('submit', async function(e) {
-        e.preventDefault();
-        if (!principalId) return;
-        clearError();
-
-        const scope = document.getElementById('scopeSelect').value;
-        const env   = document.getElementById('envInput').value.trim();
-        if (!env) { showError('Enter an environment.'); document.getElementById('envInput').focus(); return; }
-
-        grantBtn.setAttribute('aria-disabled', 'true');
-        grantBtn.textContent = 'Granting…';
-        try {
-          const resp = await fetch('/admin/grants', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ' + sessionToken,
-            },
-            body: JSON.stringify({ principal_id: principalId, scope: scope, environment: env }),
-          });
-          if (!resp.ok) {
-            const text = await resp.text();
-            if (resp.status === 401 || resp.status === 403) {
-              showError('Access denied. Your session may have expired — sign out and back in.');
-            } else if (resp.status === 409) {
-              showError('‘' + scope + '’ is already active in ‘' + env + '’.');
-            } else if (resp.status === 404) {
-              showError('Principal not found. Try looking up a different contact.');
-            } else {
-              showError('Could not grant scope: ' + text.trim());
-            }
-            return;
-          }
-          // Reload to show the new grant in the table.
-          reloadPage();
-        } catch (_) {
-          showError('Something went wrong. Try again.');
-        } finally {
-          grantBtn.removeAttribute('aria-disabled');
-          grantBtn.textContent = 'Grant scope';
-        }
       });
     }
   </script>
