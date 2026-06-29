@@ -251,6 +251,48 @@ td:last-child { width: 1%; white-space: nowrap; }
   background: #f5f5f5; border: 1px solid #ccc; color: #888;
   border-radius: 999px;
 }
+.status-not-granted {
+  display: inline-block; padding: .125rem .5rem;
+  font-size: .75rem; font-weight: 400;
+  background: #fafafa; border: 1px solid #e0e0e0; color: #999;
+  border-radius: 999px;
+}
+
+/* ── Grant action button ─────────────────────────────────────────── */
+
+/* Inline positive-action button (mirrors .revoke-btn but green) */
+.grant-btn {
+  display: inline-block; width: auto;
+  padding: .25rem .625rem; font-size: .8rem; font-weight: 500;
+  background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20;
+  border-radius: 4px; cursor: pointer; transition: background .15s;
+}
+.grant-btn:hover { background: #c8e6c9; }
+.grant-btn[aria-disabled="true"] { opacity: .5; cursor: default; pointer-events: none; }
+
+/* ── Per-scope list ──────────────────────────────────────────────── */
+
+.scope-list {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  border-top: 2px solid #e0e0e0;
+}
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .5rem .625rem;
+  border-bottom: 1px solid #f0f0f0;
+}
+.scope-name {
+  flex: 1;
+  font-family: monospace;
+  font-size: .85rem;
+  color: #1a1a1a;
+}
+.scope-status-cell { flex-shrink: 0; min-width: 6.5rem; }
+.scope-action-cell { flex-shrink: 0; }
 
 /* ── Admin page chrome ───────────────────────────────────────────── */
 
