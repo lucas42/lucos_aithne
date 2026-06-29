@@ -821,6 +821,101 @@ func TestAdminGrants_Create_DuplicateActive(t *testing.T) {
 	}
 }
 
+// TestAdminGrants_Create_IgnoresBodyEnvironment verifies that a POST body
+// supplying a foreign environment value is ignored: the grant is stamped with
+// the instance environment ("development") rather than the caller-supplied one.
+func TestAdminGrants_Create_IgnoresBodyEnvironment(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "target-contact")
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// POST with a foreign environment value — the handler must ignore it.
+	body, _ := json.Marshal(map[string]string{
+		"principal_id": target.ID,
+		"scope":        "render-ui",
+		"environment":  "production", // deliberately foreign; should be ignored
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/grants", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST /admin/grants: expected 201, got %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// The grant must carry the instance environment ("development"), not "production".
+	grants, err := s.ListGrants(target.ID, "development", true)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("expected 1 grant in development, got %d", len(grants))
+	}
+	if grants[0].Environment != "development" {
+		t.Errorf("grant environment: got %q, want %q", grants[0].Environment, "development")
+	}
+
+	// Confirm no grant was created under the caller-supplied "production" environment.
+	prodGrants, err := s.ListGrants(target.ID, "production", true)
+	if err != nil {
+		t.Fatalf("ListGrants production: %v", err)
+	}
+	if len(prodGrants) != 0 {
+		t.Errorf("expected 0 grants in production, got %d", len(prodGrants))
+	}
+}
+
+// TestAdminGrants_Create_NoEnvironmentInBody verifies that a POST body
+// omitting the environment field succeeds — existing forms still include it,
+// but clients that drop it should also work after this change.
+func TestAdminGrants_Create_NoEnvironmentInBody(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "target-contact")
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	// POST without an environment field.
+	body, _ := json.Marshal(map[string]string{
+		"principal_id": target.ID,
+		"scope":        "render-ui",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/admin/grants", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST /admin/grants without environment: expected 201, got %d\n%s", rr.Code, rr.Body.String())
+	}
+
+	// Grant must be stamped with the instance environment.
+	grants, err := s.ListGrants(target.ID, "development", true)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if len(grants) != 1 {
+		t.Errorf("expected 1 grant in development, got %d", len(grants))
+	}
+}
+
 func TestAdminGrantByID_Revoke(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
