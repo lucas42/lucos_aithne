@@ -236,11 +236,15 @@ If JWKS serves no key, or aithne logs a signing-key decryption failure at startu
 - **If the KEK is genuinely lost:** the existing signing keys are unrecoverable, but this
   is survivable. Everything *except* signing-key continuity is intact (passkeys,
   principals, grants are not KEK-encrypted). Generate a fresh KEK and let aithne mint a
-  new signing key. Existing tokens signed with the old key become invalid once their TTL
-  (≤15 min) plus the consumer JWKS cache (≤5 min) elapses — a ≤20-minute window, the same
-  as a signing-key rotation. Do **not** attempt `--rekey`: it re-wraps existing keys and
-  needs the *old* KEK, which by assumption you've lost. Instead treat the signing key as
-  destroyed and start clean. (Mechanics of KEK handling: see
+  new signing key. Tokens already signed with the old key stop being accepted within
+  **≤5 minutes** — the consumer JWKS cache TTL. Note this is *shorter* than a normal
+  rotation's window, not the same: a deliberate rotation keeps the old (still-decryptable)
+  key in JWKS for the 30-minute `VerificationWindow`, but in KEK-loss the old key cannot
+  be decrypted at all, so it is **never served** in the new JWKS. Consumers therefore stop
+  trusting old-key tokens as soon as they flush their cached JWKS (≤5 min), regardless of
+  the token's own ≤15-minute TTL. Do **not** attempt `--rekey`: it re-wraps existing keys
+  and needs the *old* KEK, which by assumption you've lost. Instead treat the signing key
+  as destroyed and start clean. (Mechanics of KEK handling: see
   [incident-response-credential-compromise.md § Scenario B](incident-response-credential-compromise.md).)
 
 ---
@@ -272,6 +276,7 @@ curl -s http://127.0.0.1:18099/.well-known/jwks.json | jq '.keys[] | .kid'
 # ALWAYS clean up — the scratch instance shares the host's resources:
 docker rm -f aithne_restore_test
 docker volume rm aithne_restore_test
+unset KEK CORIGIN CKEY      # clear the sourced secrets from the shell session
 ```
 
 Do **not** set `BOOTSTRAP_ADMIN_CONTACT_ID` on the scratch instance (you don't want it
