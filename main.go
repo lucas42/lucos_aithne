@@ -413,7 +413,7 @@ func runRekey() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then restart the service.\n", n)
+	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then redeploy the service (do not use docker start — it reuses the old baked-in env).\n", n)
 	os.Exit(0)
 }
 
@@ -484,7 +484,7 @@ func runMigrateKEK() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("migrate-kek: re-encrypted %d signing key(s) under new SHA-256-derived KEK. Update SIGNING_KEK in lucos_creds to the NEW_SIGNING_KEK value, then restart the service.\n", n)
+	fmt.Printf("migrate-kek: re-encrypted %d signing key(s) under new SHA-256-derived KEK. Update SIGNING_KEK in lucos_creds to the NEW_SIGNING_KEK value, then redeploy the service (do not use docker start — it reuses the old baked-in env).\n", n)
 	os.Exit(0)
 }
 
