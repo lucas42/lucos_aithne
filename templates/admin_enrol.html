@@ -234,9 +234,12 @@
             return;
           }
           // Success — clear the invite and show the revoked notice.
+          // Restore revokeBtn to the DOM (hidden) so the generate handler can
+          // un-hide it for a subsequent invite in the same page session.
           urlEl.textContent = '';
           copyBtn.hidden = true;
-          prompt.remove();
+          prompt.replaceWith(revokeBtn);
+          revokeBtn.hidden = true;
           expiresEl.textContent = '';
           revokedNotice.hidden = false;
           currentTokenHash = null;
