@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -241,7 +242,7 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 
 // handleAuthCodeGrant implements the authorization_code grant for handleOAuth2Token.
 // It is called after the grant_type has been confirmed to be "authorization_code".
-func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.ResponseWriter, r *http.Request) {
+func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter, w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	clientID := r.FormValue("client_id")
 	clientSecret := r.FormValue("client_secret")
@@ -250,6 +251,23 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, w http.Resp
 	if code == "" || clientID == "" || clientSecret == "" || redirectURI == "" {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request",
 			"code, client_id, client_secret, and redirect_uri are required")
+		return
+	}
+
+	// Per-client-ID rate limiting applied before any credential lookup, so
+	// repeated failures from the same client don't trigger full DB work.
+	// Fall back to IP when client_id is absent (already caught above, but guard
+	// here in case this function is called via a future path without that check).
+	limitKey := clientID
+	if limitKey == "" {
+		limitKey = clientIP(r)
+	}
+	if ok, count := tokenLimiter.Allow(limitKey); !ok {
+		reqLogger(r).Printf("rate limit exceeded: %s client_id=%q count=%d window=%s", r.URL.Path, clientID, count, tokenEndpointWindow)
+		retryAfter := fmt.Sprintf("%d", int(tokenEndpointWindow.Seconds()))
+		w.Header().Set("Retry-After", retryAfter)
+		writeTokenError(w, http.StatusTooManyRequests, "rate_limited",
+			"too many authentication attempts for this client — retry after "+retryAfter+" seconds")
 		return
 	}
 

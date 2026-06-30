@@ -104,7 +104,7 @@ func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter 
 		case "client_credentials":
 			handleClientCredentialsGrant(s, issuer, environment, tokenLimiter, w, r)
 		case "authorization_code":
-			handleAuthCodeGrant(s, issuer, environment, w, r)
+			handleAuthCodeGrant(s, issuer, environment, tokenLimiter, w, r)
 		default:
 			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
 				fmt.Sprintf("unsupported grant_type %q; supported: client_credentials, authorization_code", grantType))
