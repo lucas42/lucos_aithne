@@ -3349,6 +3349,36 @@ func TestAuthorize_MissingOpenIDScope_RedirectsError(t *testing.T) {
 	}
 }
 
+func TestAuthorize_SubstringOpenIDScope_RedirectsError(t *testing.T) {
+	// "notopenid" contains "openid" as a substring — was incorrectly accepted
+	// by the old strings.Contains check; must be rejected by the fixed code.
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	createTestOIDCClient(t, s, "myapp", []string{"https://rp.test/callback"})
+	cookie := mintSessionCookie(t, s, "test-contact-scope")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth2/authorize?response_type=code&client_id=myapp&redirect_uri=https://rp.test/callback&scope=notopenid",
+		nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if !strings.Contains(loc, "error=invalid_scope") {
+		t.Errorf("expected error=invalid_scope in redirect: %q", loc)
+	}
+}
+
 func TestAuthorize_Success_IssuesCodeAndRedirects(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
