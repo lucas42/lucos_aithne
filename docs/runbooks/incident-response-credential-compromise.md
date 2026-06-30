@@ -147,8 +147,8 @@ so the database is consistent with the new KEK before the service is restarted.
 memory; a concurrent key rotation during re-keying would race on the SQLite write.
 
 ```sh
-# 1. Generate a new 32-byte KEK.
-NEW_KEK=$(openssl rand -base64 32 | head -c 32)
+# 1. Generate a new high-entropy KEK value.
+NEW_KEK=$(openssl rand -base64 32)
 
 # 2. Stop the aithne container.
 docker stop lucos_aithne_web
@@ -156,7 +156,7 @@ docker stop lucos_aithne_web
 # 3. Run --rekey against the live database volume.
 docker run --rm \
   -v lucos_aithne_credential_store:/data \
-  -e SIGNING_KEK=<old-kek-value> \
+  -e SIGNING_KEK=<current-kek-value> \
   -e NEW_SIGNING_KEK="$NEW_KEK" \
   lucas42/lucos_aithne_web:latest --rekey
 
@@ -170,6 +170,11 @@ docker start lucos_aithne_web
 `--rekey` is atomic: if any key cannot be decrypted with the old KEK, it aborts before
 writing anything. If it exits 0, all signing key BLOBs have been re-wrapped and validated
 under the new KEK.
+
+> **Note:** `--rekey` uses SHA-256 key derivation on both the old and new KEK values
+> (the scheme introduced in lucos_aithne#244). The one-time upgrade from the legacy
+> raw-bytes scheme is handled by a separate `--migrate-kek` subcommand — see that PR
+> for the upgrade procedure.
 
 ### Step 3 — Audit for forged tokens
 
