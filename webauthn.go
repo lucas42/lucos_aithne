@@ -457,12 +457,14 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 		}
 
 		// Persist the updated sign count so replay protection works on the next auth.
-		storeCredID, newData := findAndUpdateSignCount(s, user, updatedCred)
-		if storeCredID != "" && newData != nil {
+		storeCredID, newData, err := findAndUpdateSignCount(s, user, updatedCred)
+		if err != nil {
+			// Non-fatal: log and continue. The session is still valid; the
+			// sign count update failing means the next auth is slightly less
+			// protected but not broken.
+			reqLogger(r).Printf("login/finish: find sign count for principal %s: %v", user.principal.ID, err)
+		} else if storeCredID != "" && newData != nil {
 			if err := s.UpdateCredentialData(storeCredID, newData); err != nil {
-				// Non-fatal: log and continue. The session is still valid; the
-				// sign count update failing means the next auth is slightly less
-				// protected but not broken.
 				reqLogger(r).Printf("login/finish: update sign count for principal %s: %v", user.principal.ID, err)
 			}
 		}
@@ -516,11 +518,12 @@ func handleLoginFinish(s *store.Store, wa *gwebauthn.WebAuthn, cs *ceremonyStore
 
 // findAndUpdateSignCount finds the store.Credential row matching the returned
 // credential and returns its ID + updated data bytes.
-// Returns ("", nil) if the credential cannot be found — caller logs and continues.
-func findAndUpdateSignCount(s *store.Store, user *webAuthnUser, updated *gwebauthn.Credential) (string, []byte) {
+// Returns ("", nil, nil) if the credential cannot be found — caller logs and continues.
+// Returns a non-nil error if a DB or serialisation failure prevented the lookup.
+func findAndUpdateSignCount(s *store.Store, user *webAuthnUser, updated *gwebauthn.Credential) (string, []byte, error) {
 	creds, err := s.ListCredentialsByPrincipal(user.principal.ID)
 	if err != nil {
-		return "", nil
+		return "", nil, fmt.Errorf("list credentials for principal %s: %w", user.principal.ID, err)
 	}
 	for _, c := range creds {
 		if c.Type != store.CredentialTypeWebAuthn {
@@ -541,10 +544,10 @@ func findAndUpdateSignCount(s *store.Store, user *webAuthnUser, updated *gwebaut
 			wc.Flags = updated.Flags
 			newData, err := store.MarshalWebAuthnCredential(wc)
 			if err != nil {
-				return "", nil
+				return "", nil, fmt.Errorf("marshal updated credential %s: %w", c.ID, err)
 			}
-			return c.ID, newData
+			return c.ID, newData, nil
 		}
 	}
-	return "", nil
+	return "", nil, nil
 }
