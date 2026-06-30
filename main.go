@@ -1243,9 +1243,13 @@ func handleHomePage(s *store.Store, issuer string, contacts *contactsClient, tmp
 		// Soft session check — no redirect on failure.
 		if cookie, err := r.Cookie("aithne_session"); err == nil {
 			keys, kerr := s.ListVerificationKeys(token.VerificationWindow)
-			if kerr == nil {
+			if kerr != nil {
+				reqLogger(r).Printf("handleHomePage: ListVerificationKeys: %v", kerr)
+			} else {
 				keySet, kserr := token.BuildVerificationKeySet(keys)
-				if kserr == nil {
+				if kserr != nil {
+					reqLogger(r).Printf("handleHomePage: BuildVerificationKeySet: %v", kserr)
+				} else {
 					claims, perr := token.ParseSession(cookie.Value, keySet, issuer, "l42.eu")
 					if perr == nil {
 						data.LoggedIn = true
