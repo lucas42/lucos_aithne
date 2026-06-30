@@ -91,11 +91,12 @@ Every admin has lost their passkey, or grants were revoked into a corner. Break-
 The `lucos_aithne_credential_store` volume holds the SQLite database. If the volume is
 destroyed (disk failure, accidental `docker volume rm`, etc.):
 
-1. **Restore from backup first.** The volume is backed up by `lucos_backups` (classified
-   `recreate_effort: considerable` in lucos_configy). Follow the standard volume restore
-   procedure for `lucos_aithne_credential_store`. After a successful restore, the service
-   restarts normally — all principals, passkeys, and grants are intact and no bootstrap
-   procedure is needed. Proceed no further.
+1. **Restore from backup first.** The volume is backed up by `lucos_backups`. Follow the
+   dedicated, tested procedure in
+   [restore-credential-store.md](restore-credential-store.md) for
+   `lucos_aithne_credential_store`. After a successful restore, the service restarts
+   normally — all principals, passkeys, and grants are intact and no bootstrap procedure
+   is needed. Proceed no further.
 
 2. **If restore is not possible** (no usable backup, or backup pre-dates the passkey
    enrolment): the database must be rebuilt from scratch. Treat this as a full
