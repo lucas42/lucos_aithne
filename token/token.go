@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -221,16 +222,19 @@ func JWKSHandler(getKeys func() ([]*store.SigningKey, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		keys, err := getKeys()
 		if err != nil {
+			log.Printf("JWKSHandler: load signing keys: %v", err)
 			http.Error(w, "failed to load signing keys", http.StatusInternalServerError)
 			return
 		}
 		set, err := BuildVerificationKeySet(keys)
 		if err != nil {
+			log.Printf("JWKSHandler: build JWKS: %v", err)
 			http.Error(w, "failed to build JWKS", http.StatusInternalServerError)
 			return
 		}
 		b, err := json.Marshal(set)
 		if err != nil {
+			log.Printf("JWKSHandler: serialise JWKS: %v", err)
 			http.Error(w, "failed to serialise JWKS", http.StatusInternalServerError)
 			return
 		}
