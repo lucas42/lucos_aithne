@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -316,12 +317,7 @@ func runBootstrapInvite() {
 	appOrigin := getEnvRequired("APP_ORIGIN")
 
 	signingKEKStr := getEnvRequired("SIGNING_KEK")
-	if len(signingKEKStr) != 32 {
-		fmt.Fprintf(os.Stderr, "bootstrap-invite: SIGNING_KEK must be exactly 32 bytes, got %d\n", len(signingKEKStr))
-		os.Exit(1)
-	}
-	var signingKEK [32]byte
-	copy(signingKEK[:], signingKEKStr)
+	signingKEK := sha256.Sum256([]byte(signingKEKStr))
 
 	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
 	s, err := store.Open(dbPath, signingKEK)
@@ -361,18 +357,17 @@ func runRekey() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
 	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
 
-	if len(oldKEKStr) != 32 {
-		fmt.Fprintf(os.Stderr, "rekey: SIGNING_KEK must be 32 bytes, got %d\n", len(oldKEKStr))
+	if oldKEKStr == "" {
+		fmt.Fprintln(os.Stderr, "rekey: SIGNING_KEK is not set")
 		os.Exit(1)
 	}
-	if len(newKEKStr) != 32 {
-		fmt.Fprintf(os.Stderr, "rekey: NEW_SIGNING_KEK must be 32 bytes, got %d\n", len(newKEKStr))
+	if newKEKStr == "" {
+		fmt.Fprintln(os.Stderr, "rekey: NEW_SIGNING_KEK is not set")
 		os.Exit(1)
 	}
 
-	var oldKEK, newKEK [32]byte
-	copy(oldKEK[:], oldKEKStr)
-	copy(newKEK[:], newKEKStr)
+	oldKEK := sha256.Sum256([]byte(oldKEKStr))
+	newKEK := sha256.Sum256([]byte(newKEKStr))
 
 	if oldKEK == newKEK {
 		fmt.Fprintln(os.Stderr, "rekey: SIGNING_KEK and NEW_SIGNING_KEK are identical — nothing to do")
@@ -1317,19 +1312,16 @@ func main() {
 	}
 	log.Printf("Scope vocabulary loaded: %v", vocab.All())
 
-	// Read the signing key KEK from the environment. Must be exactly 32 bytes
-	// for AES-256-GCM. Stored in lucos_creds as SIGNING_KEK.
+	// Read the signing key KEK from the environment. The raw value is run through
+	// SHA-256 to produce the 32-byte AES-256-GCM key, so any high-entropy string
+	// of any length is accepted. Stored in lucos_creds as SIGNING_KEK.
 	//
 	// The value MUST be randomly generated — not a human-typed passphrase.
 	// Generate a suitable value with:
-	//   openssl rand -base64 32 | head -c 32
+	//   openssl rand -base64 32
 	// Store the result in lucos_creds; never commit it to source control.
 	signingKEKStr := getEnvRequired("SIGNING_KEK")
-	if len(signingKEKStr) != 32 {
-		log.Fatalf("SIGNING_KEK must be exactly 32 bytes, got %d", len(signingKEKStr))
-	}
-	var signingKEK [32]byte
-	copy(signingKEK[:], signingKEKStr)
+	signingKEK := sha256.Sum256([]byte(signingKEKStr))
 
 	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
 	if err := ensureDir(dbPath); err != nil {

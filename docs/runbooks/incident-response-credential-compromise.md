@@ -147,8 +147,8 @@ so the database is consistent with the new KEK before the service is restarted.
 memory; a concurrent key rotation during re-keying would race on the SQLite write.
 
 ```sh
-# 1. Generate a new 32-byte KEK.
-NEW_KEK=$(openssl rand -base64 32 | head -c 32)
+# 1. Generate a new high-entropy KEK value.
+NEW_KEK=$(openssl rand -base64 32)
 
 # 2. Stop the aithne container.
 docker stop lucos_aithne_web
