@@ -98,6 +98,15 @@ func getEnvRequired(key string) string {
 	return val
 }
 
+// isQuoteWrapped reports whether s is surrounded by double-quote characters.
+// lucos_creds .env files quote values (e.g. KEY="value"), but Docker injects
+// the value without the quotes. Passing a quote-wrapped KEK to --migrate-kek
+// or --rekey produces a different sha256 digest than the container uses at
+// runtime, causing a silent migration that leaves the service unable to decrypt.
+func isQuoteWrapped(s string) bool {
+	return len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"'
+}
+
 func handleInfo(system string, s *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const dbDetail = "Checks whether a connection to the SQLite credential store can be established"
@@ -354,9 +363,9 @@ func runBootstrapInvite() {
 //	  -v lucos_aithne_credential_store:/data \
 //	  -e SIGNING_KEK=<old-value> \
 //	  -e NEW_SIGNING_KEK=<new-value> \
-//	  lucas42/lucos_aithne_web:latest --rekey
+//	  lucas42/lucos_aithne:latest /lucos_aithne --rekey
 //
-// After successful exit: update SIGNING_KEK in lucos_creds, then restart the service.
+// After successful exit: update SIGNING_KEK in lucos_creds, then redeploy the service.
 func runRekey() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
 	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
@@ -367,6 +376,18 @@ func runRekey() {
 	}
 	if newKEKStr == "" {
 		fmt.Fprintln(os.Stderr, "rekey: NEW_SIGNING_KEK is not set")
+		os.Exit(1)
+	}
+	// Detect quote-wrapped values — lucos_creds stores values with surrounding
+	// quotes in the .env file, but the container receives the unquoted form.
+	// Feeding a quoted value produces a different derived key than the container
+	// will use at runtime: the migration exits 0 but the service crash-loops.
+	if isQuoteWrapped(oldKEKStr) {
+		fmt.Fprintln(os.Stderr, "rekey: SIGNING_KEK appears to be quote-wrapped — pass the raw value, not the .env representation")
+		os.Exit(1)
+	}
+	if isQuoteWrapped(newKEKStr) {
+		fmt.Fprintln(os.Stderr, "rekey: NEW_SIGNING_KEK appears to be quote-wrapped — pass the raw value, not the .env representation")
 		os.Exit(1)
 	}
 
@@ -392,7 +413,7 @@ func runRekey() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then restart the service.\n", n)
+	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then redeploy the service (do not use docker start — it reuses the old baked-in env).\n", n)
 	os.Exit(0)
 }
 
@@ -414,9 +435,9 @@ func runRekey() {
 //	  -v lucos_aithne_credential_store:/data \
 //	  -e SIGNING_KEK=<current-raw-value> \
 //	  -e NEW_SIGNING_KEK=<new-value> \
-//	  lucas42/lucos_aithne_web:latest --migrate-kek
+//	  lucas42/lucos_aithne:latest /lucos_aithne --migrate-kek
 //
-// After successful exit: update SIGNING_KEK in lucos_creds to <new-value>, then restart.
+// After successful exit: update SIGNING_KEK in lucos_creds to <new-value>, then redeploy.
 func runMigrateKEK() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
 	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
@@ -427,6 +448,18 @@ func runMigrateKEK() {
 	}
 	if newKEKStr == "" {
 		fmt.Fprintln(os.Stderr, "migrate-kek: NEW_SIGNING_KEK is not set")
+		os.Exit(1)
+	}
+	// Detect quote-wrapped values — lucos_creds stores values with surrounding
+	// quotes in the .env file, but the container receives the unquoted form.
+	// Feeding a quoted value produces a different derived key than the container
+	// will use at runtime: the migration exits 0 but the service crash-loops.
+	if isQuoteWrapped(oldKEKStr) {
+		fmt.Fprintln(os.Stderr, "migrate-kek: SIGNING_KEK appears to be quote-wrapped — pass the raw value, not the .env representation")
+		os.Exit(1)
+	}
+	if isQuoteWrapped(newKEKStr) {
+		fmt.Fprintln(os.Stderr, "migrate-kek: NEW_SIGNING_KEK appears to be quote-wrapped — pass the raw value, not the .env representation")
 		os.Exit(1)
 	}
 
@@ -451,7 +484,7 @@ func runMigrateKEK() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("migrate-kek: re-encrypted %d signing key(s) under new SHA-256-derived KEK. Update SIGNING_KEK in lucos_creds to the NEW_SIGNING_KEK value, then restart the service.\n", n)
+	fmt.Printf("migrate-kek: re-encrypted %d signing key(s) under new SHA-256-derived KEK. Update SIGNING_KEK in lucos_creds to the NEW_SIGNING_KEK value, then redeploy the service (do not use docker start — it reuses the old baked-in env).\n", n)
 	os.Exit(0)
 }
 
@@ -1352,11 +1385,8 @@ func deriveRPID(appOrigin string) string {
 }
 
 func main() {
-	port := getEnvRequired("PORT")
-
-	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
-		runHealthcheck(port)
-	}
+	// Maintenance subcommands that don't require a listening port are dispatched
+	// before getEnvRequired("PORT") so they can run without PORT being set.
 	if len(os.Args) > 1 && os.Args[1] == "--bootstrap-invite" {
 		runBootstrapInvite()
 	}
@@ -1365,6 +1395,12 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--migrate-kek" {
 		runMigrateKEK()
+	}
+
+	port := getEnvRequired("PORT")
+
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		runHealthcheck(port)
 	}
 
 	system := getEnvRequired("SYSTEM")

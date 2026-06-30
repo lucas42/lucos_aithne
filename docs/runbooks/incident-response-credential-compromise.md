@@ -151,20 +151,21 @@ memory; a concurrent key rotation during re-keying would race on the SQLite writ
 NEW_KEK=$(openssl rand -base64 32)
 
 # 2. Stop the aithne container.
-docker stop lucos_aithne_web
+docker stop lucos_aithne
 
 # 3. Run --rekey against the live database volume.
+#    Pass the raw KEK values — NOT the quoted form from the .env file.
 docker run --rm \
   -v lucos_aithne_credential_store:/data \
   -e SIGNING_KEK=<current-kek-value> \
   -e NEW_SIGNING_KEK="$NEW_KEK" \
-  lucas42/lucos_aithne_web:latest --rekey
+  lucas42/lucos_aithne:latest /lucos_aithne --rekey
 
 # 4. If --rekey exits 0: update SIGNING_KEK in lucos_creds to $NEW_KEK.
 #    (Only lucas42 can write to the production environment.)
 
-# 5. Restart the service — it picks up the new KEK and starts cleanly.
-docker start lucos_aithne_web
+# 5. Redeploy the service so it picks up the new KEK from lucos_creds.
+#    (docker start reuses the old baked-in env — redeploy is required.)
 ```
 
 `--rekey` is atomic: if any key cannot be decrypted with the old KEK, it aborts before
@@ -172,9 +173,9 @@ writing anything. If it exits 0, all signing key BLOBs have been re-wrapped and 
 under the new KEK.
 
 > **Note:** `--rekey` uses SHA-256 key derivation on both the old and new KEK values
-> (the scheme introduced in lucos_aithne#244). The one-time upgrade from the legacy
-> raw-bytes scheme is handled by a separate `--migrate-kek` subcommand — see that PR
-> for the upgrade procedure.
+> (the scheme introduced in lucas42/lucos_aithne#244). The one-time upgrade from the legacy
+> raw-bytes scheme is handled by a separate `--migrate-kek` subcommand. For the full
+> procedure covering both subcommands, see `docs/runbooks/rotate-or-migrate-signing-kek.md`.
 
 ### Step 3 — Audit for forged tokens
 
