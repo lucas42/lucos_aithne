@@ -2106,7 +2106,7 @@ func TestCeremonyStore_OneTimeUse(t *testing.T) {
 // admin/machine-keys, and admin/machine-keys/{id} endpoints registered.
 func newMachineAuthMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/token", handleClientCredentials(s, testIssuer, "development", noopLimiter()))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter()))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
 	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, testIssuer, handleAdminMachineKeyByID(s)))
 	return mux
@@ -2285,29 +2285,6 @@ func TestClientCredentials_MissingCredentials(t *testing.T) {
 	_ = json.NewDecoder(rr.Body).Decode(&errResp)
 	if errResp.Error != "invalid_client" {
 		t.Errorf("error: got %q, want %q", errResp.Error, "invalid_client")
-	}
-}
-
-func TestClientCredentials_WrongGrantType(t *testing.T) {
-	s, err := store.Open(":memory:", testMainKEK)
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	defer s.Close()
-
-	body := strings.NewReader("grant_type=authorization_code&client_id=foo&client_secret=bar")
-	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	newMachineAuthMux(s).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rr.Code)
-	}
-	var errResp tokenErrorResponse
-	_ = json.NewDecoder(rr.Body).Decode(&errResp)
-	if errResp.Error != "unsupported_grant_type" {
-		t.Errorf("error: got %q, want %q", errResp.Error, "unsupported_grant_type")
 	}
 }
 

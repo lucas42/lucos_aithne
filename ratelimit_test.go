@@ -161,7 +161,7 @@ func TestRateLimit_TokenEndpoint_429OnBreach(t *testing.T) {
 	s := newTestStoreForRL(t)
 	// Limit of 2 so the 3rd request triggers 429.
 	limiter := newKeyedLimiter(2, time.Minute)
-	handler := handleClientCredentials(s, testIssuer, "development", limiter)
+	handler := handleOAuth2Token(s, testIssuer, "development", limiter)
 
 	makeRequest := func() *httptest.ResponseRecorder {
 		body := "grant_type=client_credentials&client_id=testclient&client_secret=testpass"
@@ -204,7 +204,7 @@ func TestRateLimit_TokenEndpoint_KeyIsClientID(t *testing.T) {
 	s := newTestStoreForRL(t)
 	// Limit of 1 per key.
 	limiter := newKeyedLimiter(1, time.Minute)
-	handler := handleClientCredentials(s, testIssuer, "development", limiter)
+	handler := handleOAuth2Token(s, testIssuer, "development", limiter)
 
 	makeRequest := func(clientID, ip string) *httptest.ResponseRecorder {
 		body := fmt.Sprintf("grant_type=client_credentials&client_id=%s&client_secret=pass", clientID)
