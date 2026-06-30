@@ -823,7 +823,11 @@ func createGrant(s *store.Store, vocab *store.Vocabulary, environment string) ht
 
 		// Attribution is read from the verified JWT claims injected by
 		// requireAdminScope — never from a client-supplied field.
-		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		claims, ok := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		if !ok {
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		grantedBy := claims.Subject
 
 		// environment is the instance-level value passed at handler construction
@@ -870,7 +874,11 @@ func handleGrantByID(s *store.Store) http.HandlerFunc {
 
 		// Attribution is read from the verified JWT claims injected by
 		// requireAdminScope — never from a client-supplied header.
-		claims := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		claims, ok := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		if !ok {
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		revokedBy := claims.Subject
 
 		err := s.RevokeGrant(id, revokedBy)
