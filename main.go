@@ -342,17 +342,23 @@ func runBootstrapInvite() {
 // re-encrypts all signing key BLOBs under the new KEK, prints a confirmation, and
 // exits 0. Exits non-zero on any error. The HTTP server is never started.
 //
+// Migration note (lucos_aithne#244): SIGNING_KEK is used as raw bytes (legacy path)
+// to decrypt existing data; NEW_SIGNING_KEK is passed through sha256.Sum256 (new path).
+// This makes --rekey a one-shot migration tool: existing data encrypted under raw bytes
+// is re-encrypted under sha256(NEW_SIGNING_KEK), and the service thereafter reads it
+// correctly on startup.
+//
 // The service MUST be stopped before running --rekey. A running service holds the
 // old KEK in memory; a concurrent RotateSigningKey() during re-keying would race
-// on the SQLite write. Stop the container first, then run:
+// on the SQLite write. Stop the container first, then run with the NEW image:
 //
 //	docker run --rm \
 //	  -v lucos_aithne_credential_store:/data \
-//	  -e SIGNING_KEK=<old-value> \
+//	  -e SIGNING_KEK=<current-value> \
 //	  -e NEW_SIGNING_KEK=<new-value> \
 //	  lucas42/lucos_aithne_web:latest --rekey
 //
-// After successful exit: update SIGNING_KEK in lucos_creds, then restart the service.
+// After successful exit: update SIGNING_KEK in lucos_creds to <new-value>, then restart.
 func runRekey() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
 	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
@@ -366,7 +372,14 @@ func runRekey() {
 		os.Exit(1)
 	}
 
-	oldKEK := sha256.Sum256([]byte(oldKEKStr))
+	// oldKEK uses the legacy raw-bytes path: existing signing keys in the DB were
+	// encrypted with copy(kek[:], signingKEKStr) before this KDF change. Using
+	// sha256.Sum256 here would produce a different key and fail to decrypt them.
+	var oldKEK [32]byte
+	copy(oldKEK[:], oldKEKStr)
+	// newKEK uses the new KDF path. After --rekey, update SIGNING_KEK in
+	// lucos_creds to the NEW_SIGNING_KEK value; the service derives the same key
+	// on startup via sha256.Sum256.
 	newKEK := sha256.Sum256([]byte(newKEKStr))
 
 	if oldKEK == newKEK {
