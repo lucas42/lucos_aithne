@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ErrUnknownScope is returned when a scope string is not in the vocabulary.
@@ -76,10 +78,11 @@ func (s *Store) CreateGrant(principalID, scope, environment, grantedByExternalID
 	if !vocab.Contains(scope) {
 		return nil, ErrUnknownScope
 	}
-	id, err := newID()
+	uid, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate grant id: %w", err)
 	}
+	id := uid.String()
 	now := time.Now().UTC()
 	_, err = s.db.Exec(
 		`INSERT INTO grants (id, principal_id, scope, environment, granted_by, granted_at)
