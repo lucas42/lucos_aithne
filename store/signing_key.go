@@ -252,7 +252,12 @@ func (s *Store) MigrateSigningKeyEncryption() (int, error) {
 		// Decryption failed. Check whether the blob is a raw PKCS8 DER (legacy
 		// unencrypted format). If so, queue it for re-encryption.
 		if _, err := x509.ParsePKCS8PrivateKey(blob); err != nil {
-			return 0, fmt.Errorf("store: migrate signing key encryption: key %q is neither AES-GCM ciphertext nor valid PKCS8 DER — database may be corrupt: %w", id, err)
+			// The blob is neither decryptable under the current KEK nor a valid
+			// unencrypted PKCS8 key. Most likely cause: the blob was encrypted
+			// under a different KEK derivation (e.g. the legacy raw-bytes scheme
+			// before SHA-256 derivation was introduced). Run --migrate-kek, or
+			// verify that SIGNING_KEK is set to the correct value.
+			return 0, fmt.Errorf("store: migrate signing key encryption: key %q could not be decrypted under the current SIGNING_KEK and is not a legacy unencrypted PKCS8 key — if upgrading to SHA-256 KEK derivation, run --migrate-kek; otherwise verify SIGNING_KEK is correct: %w", id, err)
 		}
 		toMigrate = append(toMigrate, entry{id: id, raw: blob})
 	}
@@ -316,7 +321,7 @@ func (s *Store) RekeySigningKeys(newKek [32]byte) (int, error) {
 		// Decrypt with the current KEK — abort immediately if this fails.
 		der, err := decryptKeyDER(s.kek, blob)
 		if err != nil {
-			return 0, fmt.Errorf("store: rekey signing keys: key %q: decrypt with old KEK failed (wrong KEK or corrupt DB): %w", id, err)
+			return 0, fmt.Errorf("store: rekey signing keys: key %q: decrypt with old KEK failed — verify SIGNING_KEK matches the value the key was encrypted under; if migrating from the legacy raw-bytes scheme, use --migrate-kek instead: %w", id, err)
 		}
 		// Encrypt under the new KEK.
 		newBlob, err := encryptKeyDER(newKek, der)
