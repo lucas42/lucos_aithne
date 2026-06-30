@@ -153,9 +153,7 @@ NEW_KEK=$(openssl rand -base64 32)
 # 2. Stop the aithne container.
 docker stop lucos_aithne_web
 
-# 3. Run --rekey using the NEW image against the live database volume.
-#    The new image decrypts existing data with the raw SIGNING_KEK value
-#    and re-encrypts under sha256(NEW_SIGNING_KEK) in one pass.
+# 3. Run --rekey against the live database volume.
 docker run --rm \
   -v lucos_aithne_credential_store:/data \
   -e SIGNING_KEK=<current-kek-value> \
@@ -165,13 +163,18 @@ docker run --rm \
 # 4. If --rekey exits 0: update SIGNING_KEK in lucos_creds to $NEW_KEK.
 #    (Only lucas42 can write to the production environment.)
 
-# 5. Restart the service with the new image — it derives sha256($NEW_KEK) and starts cleanly.
+# 5. Restart the service — it picks up the new KEK and starts cleanly.
 docker start lucos_aithne_web
 ```
 
 `--rekey` is atomic: if any key cannot be decrypted with the old KEK, it aborts before
 writing anything. If it exits 0, all signing key BLOBs have been re-wrapped and validated
 under the new KEK.
+
+> **Note:** `--rekey` uses SHA-256 key derivation on both the old and new KEK values
+> (the scheme introduced in lucos_aithne#244). The one-time upgrade from the legacy
+> raw-bytes scheme is handled by a separate `--migrate-kek` subcommand — see that PR
+> for the upgrade procedure.
 
 ### Step 3 — Audit for forged tokens
 

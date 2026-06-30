@@ -342,23 +342,21 @@ func runBootstrapInvite() {
 // re-encrypts all signing key BLOBs under the new KEK, prints a confirmation, and
 // exits 0. Exits non-zero on any error. The HTTP server is never started.
 //
-// Migration note (lucos_aithne#244): SIGNING_KEK is used as raw bytes (legacy path)
-// to decrypt existing data; NEW_SIGNING_KEK is passed through sha256.Sum256 (new path).
-// This makes --rekey a one-shot migration tool: existing data encrypted under raw bytes
-// is re-encrypted under sha256(NEW_SIGNING_KEK), and the service thereafter reads it
-// correctly on startup.
+// Both keys are derived via sha256.Sum256, matching the startup path. This is the
+// correct subcommand for routine KEK rotation after the initial KDF migration has
+// been performed with --migrate-kek.
 //
 // The service MUST be stopped before running --rekey. A running service holds the
 // old KEK in memory; a concurrent RotateSigningKey() during re-keying would race
-// on the SQLite write. Stop the container first, then run with the NEW image:
+// on the SQLite write. Stop the container first, then run:
 //
 //	docker run --rm \
 //	  -v lucos_aithne_credential_store:/data \
-//	  -e SIGNING_KEK=<current-value> \
+//	  -e SIGNING_KEK=<old-value> \
 //	  -e NEW_SIGNING_KEK=<new-value> \
 //	  lucas42/lucos_aithne_web:latest --rekey
 //
-// After successful exit: update SIGNING_KEK in lucos_creds to <new-value>, then restart.
+// After successful exit: update SIGNING_KEK in lucos_creds, then restart the service.
 func runRekey() {
 	oldKEKStr := os.Getenv("SIGNING_KEK")
 	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
@@ -372,14 +370,7 @@ func runRekey() {
 		os.Exit(1)
 	}
 
-	// oldKEK uses the legacy raw-bytes path: existing signing keys in the DB were
-	// encrypted with copy(kek[:], signingKEKStr) before this KDF change. Using
-	// sha256.Sum256 here would produce a different key and fail to decrypt them.
-	var oldKEK [32]byte
-	copy(oldKEK[:], oldKEKStr)
-	// newKEK uses the new KDF path. After --rekey, update SIGNING_KEK in
-	// lucos_creds to the NEW_SIGNING_KEK value; the service derives the same key
-	// on startup via sha256.Sum256.
+	oldKEK := sha256.Sum256([]byte(oldKEKStr))
 	newKEK := sha256.Sum256([]byte(newKEKStr))
 
 	if oldKEK == newKEK {
@@ -402,6 +393,65 @@ func runRekey() {
 	}
 
 	fmt.Printf("rekey: re-encrypted %d signing key(s) under new KEK. Update SIGNING_KEK in lucos_creds now, then restart the service.\n", n)
+	os.Exit(0)
+}
+
+// runMigrateKEK is the entrypoint for the --migrate-kek subcommand.
+// It performs the one-time migration from the legacy raw-bytes KEK scheme to the
+// SHA-256-derived KEK scheme introduced in lucos_aithne#244.
+//
+// SIGNING_KEK is consumed as raw bytes (the legacy path) to decrypt existing signing
+// key BLOBs; they are re-encrypted under sha256.Sum256(NEW_SIGNING_KEK). After
+// migration, the service startup path (which now derives the key via sha256.Sum256)
+// and future --rekey calls (which also use sha256.Sum256) both work correctly.
+//
+// Run once when upgrading to the version that introduced SHA-256 key derivation.
+// Do not run again after that — use --rekey for all subsequent KEK rotations.
+//
+// The service MUST be stopped before running --migrate-kek.
+//
+//	docker run --rm \
+//	  -v lucos_aithne_credential_store:/data \
+//	  -e SIGNING_KEK=<current-raw-value> \
+//	  -e NEW_SIGNING_KEK=<new-value> \
+//	  lucas42/lucos_aithne_web:latest --migrate-kek
+//
+// After successful exit: update SIGNING_KEK in lucos_creds to <new-value>, then restart.
+func runMigrateKEK() {
+	oldKEKStr := os.Getenv("SIGNING_KEK")
+	newKEKStr := os.Getenv("NEW_SIGNING_KEK") // lucos_repos: noenv NEW_SIGNING_KEK
+
+	if oldKEKStr == "" {
+		fmt.Fprintln(os.Stderr, "migrate-kek: SIGNING_KEK is not set")
+		os.Exit(1)
+	}
+	if newKEKStr == "" {
+		fmt.Fprintln(os.Stderr, "migrate-kek: NEW_SIGNING_KEK is not set")
+		os.Exit(1)
+	}
+
+	// oldKEK uses the legacy raw-bytes path: existing signing keys were encrypted
+	// with copy(kek[:], signingKEKStr) before the SHA-256 KDF was introduced.
+	var oldKEK [32]byte
+	copy(oldKEK[:], oldKEKStr)
+	// newKEK uses the SHA-256 KDF path, matching startup and future --rekey calls.
+	newKEK := sha256.Sum256([]byte(newKEKStr))
+
+	dbPath := getEnvWithDefault("DB_PATH", "/data/aithne.db")
+	s, err := store.Open(dbPath, oldKEK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate-kek: open store at %q: %v\n", dbPath, err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	n, err := s.RekeySigningKeys(newKEK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "migrate-kek: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("migrate-kek: re-encrypted %d signing key(s) under new SHA-256-derived KEK. Update SIGNING_KEK in lucos_creds to the NEW_SIGNING_KEK value, then restart the service.\n", n)
 	os.Exit(0)
 }
 
@@ -1312,6 +1362,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--rekey" {
 		runRekey()
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--migrate-kek" {
+		runMigrateKEK()
 	}
 
 	system := getEnvRequired("SYSTEM")
