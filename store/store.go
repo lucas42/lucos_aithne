@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
@@ -303,10 +304,11 @@ func (s *Store) addColumnIfNotExists(table, decl string) error {
 // CreatePrincipal adds a new principal to the registry.
 // Returns ErrDuplicate if (class, externalID) is already registered.
 func (s *Store) CreatePrincipal(class PrincipalClass, externalID string) (*Principal, error) {
-	id, err := newID()
+	uid, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate id: %w", err)
 	}
+	id := uid.String()
 	now := time.Now().UTC()
 	_, err = s.db.Exec(
 		`INSERT INTO principals (id, class, external_id, created_at) VALUES (?, ?, ?, ?)`,
@@ -391,10 +393,11 @@ func (s *Store) DeletePrincipal(id string) error {
 // CreateCredential adds a new credential bound to an existing principal.
 // Returns ErrNotFound if principalID does not reference a known principal.
 func (s *Store) CreateCredential(principalID string, credType CredentialType, data []byte, label string) (*Credential, error) {
-	id, err := newID()
+	uid, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate id: %w", err)
 	}
+	id := uid.String()
 	now := time.Now().UTC()
 	_, err = s.db.Exec(
 		`INSERT INTO credentials (id, principal_id, type, data, label, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -615,18 +618,6 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse("2006-01-02 15:04:05", s)
 }
 
-// newID returns a new random UUID v4.
-func newID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
-}
-
 // HashToken returns the hex-encoded SHA-256 of rawToken.
 // This is the value stored in the enrolment_invites table.
 func HashToken(rawToken string) string {
@@ -659,10 +650,11 @@ func (s *Store) ReplaceWebAuthnCredentialAndConsumeInvite(principalID, rawToken 
 	}
 
 	// 2. Insert the new credential.
-	id, err := newID()
+	uid, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate credential id: %w", err)
 	}
+	id := uid.String()
 	now := time.Now().UTC()
 	if _, err := tx.Exec(
 		`INSERT INTO credentials (id, principal_id, type, data, label, created_at) VALUES (?, ?, ?, ?, ?, ?)`,

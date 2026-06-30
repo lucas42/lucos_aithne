@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // dbExec is a minimal interface satisfied by both *sql.DB and *sql.Tx,
@@ -142,10 +144,11 @@ func (s *Store) generateSigningKey() (*SigningKey, error) {
 // (either *sql.DB or *sql.Tx). The private key DER is AES-256-GCM encrypted with
 // kek before being stored in the database.
 func generateSigningKeyWith(db dbExec, kek [32]byte) (*SigningKey, error) {
-	id, err := newID()
+	uid, err := uuid.NewRandom()
 	if err != nil {
 		return nil, fmt.Errorf("store: generate signing key id: %w", err)
 	}
+	id := uid.String()
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("store: generate EC key: %w", err)
