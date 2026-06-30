@@ -298,7 +298,7 @@ td:last-child { width: 1%; white-space: nowrap; }
 
 .empty { color: #888; font-size: .875rem; margin-bottom: 1.5rem; }
 .section-sep { border: none; border-top: 1px solid #e0e0e0; margin: 0 0 1.25rem; }
-.provision-heading { font-size: .875rem; font-weight: 600; margin-bottom: .75rem; }
+.provision-heading { font-size: .875rem; font-weight: 600; margin-top: 0; margin-bottom: .75rem; }
 
 /* ── Grant / provision forms ─────────────────────────────────────── */
 
