@@ -33,6 +33,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -161,7 +162,7 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 			return
 		}
 
-		if !strings.Contains(scopeStr, "openid") {
+		if !slices.Contains(parseScopeParam(scopeStr), "openid") {
 			redirectError("invalid_scope", "scope must include openid")
 			return
 		}
