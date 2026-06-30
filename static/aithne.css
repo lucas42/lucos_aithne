@@ -113,7 +113,7 @@ select:focus { border-color: #c49000; }
   font-size: .8em;
   font-weight: normal;
   font-style: italic;
-  color: #888;
+  color: #666;
 }
 
 /* ── Admin section tab nav ───────────────────────────────────────── */
@@ -125,7 +125,7 @@ select:focus { border-color: #c49000; }
   border-bottom: 2px solid #e0e0e0;
 }
 .admin-nav a {
-  color: #777; text-decoration: none; font-size: .8rem;
+  color: #666; text-decoration: none; font-size: .8rem;
   padding: .5rem .875rem;
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
@@ -296,7 +296,7 @@ td:last-child { width: 1%; white-space: nowrap; }
 
 /* ── Admin page chrome ───────────────────────────────────────────── */
 
-.empty { color: #888; font-size: .875rem; margin-bottom: 1.5rem; }
+.empty { color: #666; font-size: .875rem; margin-bottom: 1.5rem; }
 .section-sep { border: none; border-top: 1px solid #e0e0e0; margin: 0 0 1.25rem; }
 .provision-heading { font-size: .875rem; font-weight: 600; margin-top: 0; margin-bottom: .75rem; }
 
@@ -358,13 +358,13 @@ td:last-child { width: 1%; white-space: nowrap; }
   border-radius: 4px;
   margin-bottom: .5rem;
 }
-.expires { font-size: .75rem; color: #777; margin-top: .375rem; }
+.expires { font-size: .75rem; color: #666; margin-top: .375rem; }
 .revoked-notice { margin-top: .625rem; font-size: .8rem; color: #c0392b; font-weight: 500; }
 
 /* ── Enrolment page ──────────────────────────────────────────────── */
 
 .setup-context { font-size: .875rem; color: #555; margin-bottom: 1.25rem; }
-.hint { font-size: .8rem; color: #777; margin-top: -.75rem; margin-bottom: 1rem; }
+.hint { font-size: .8rem; color: #666; margin-top: -.75rem; margin-bottom: 1rem; }
 .success { text-align: center; margin-top: .5rem; }
 .success p { color: #555; font-size: .875rem; margin-bottom: 1rem; }
 .success a {
