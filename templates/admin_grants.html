@@ -264,10 +264,11 @@
         actionCell.appendChild(prompt);
         confirmBtn.focus();
 
-        // Cancel: restore the original Revoke button.
+        // Cancel: restore the original Revoke button and return focus to it.
         cancelBtn.addEventListener('click', function() {
           actionCell.innerHTML = '';
           actionCell.appendChild(origBtn);
+          origBtn.focus();
         });
 
         // Confirm: DELETE /admin/grants/{id}.
