@@ -230,6 +230,52 @@ func TestRateLimit_TokenEndpoint_KeyIsClientID(t *testing.T) {
 	}
 }
 
+func TestRateLimit_AuthCodeGrant_429OnBreach(t *testing.T) {
+	s := newTestStoreForRL(t)
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+	// Limit of 2 so the 3rd request triggers 429.
+	limiter := newKeyedLimiter(2, time.Minute)
+	handler := handleOAuth2Token(s, testIssuer, "development", limiter)
+
+	makeRequest := func() *httptest.ResponseRecorder {
+		body := "grant_type=authorization_code&client_id=testclient&client_secret=badsecret&code=fakecode&redirect_uri=https://rp.test/callback"
+		req := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Real-IP", "10.0.0.1")
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+		return rr
+	}
+
+	// First two requests reach the auth logic (fail with 4xx — unknown client, but not 429).
+	for i := 0; i < 2; i++ {
+		rr := makeRequest()
+		if rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d: unexpected 429 before limit exceeded", i+1)
+		}
+	}
+
+	// Third request should be rate-limited.
+	rr := makeRequest()
+	if rr.Code != http.StatusTooManyRequests {
+		t.Errorf("3rd request: expected 429, got %d\nbody: %s", rr.Code, rr.Body.String())
+	}
+	wantRetryAfter := fmt.Sprintf("%d", int(tokenEndpointWindow.Seconds()))
+	if ra := rr.Header().Get("Retry-After"); ra != wantRetryAfter {
+		t.Errorf("3rd request: Retry-After header: got %q, want %q", ra, wantRetryAfter)
+	}
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err == nil {
+		if errResp.Error != "rate_limited" {
+			t.Errorf("3rd request: error field: got %q, want %q", errResp.Error, "rate_limited")
+		}
+	}
+}
+
 func TestRateLimit_LoginBegin_429OnBreach(t *testing.T) {
 	s := newTestStoreForRL(t)
 	wa := newTestWAForRL(t)
