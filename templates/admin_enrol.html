@@ -172,40 +172,79 @@
       }
     });
 
-    revokeBtn.addEventListener('click', async function() {
-      if (!currentTokenHash) { return; }
-      revokeBtn.setAttribute('aria-disabled', 'true');
+    revokeBtn.addEventListener('click', function() {
+      if (!currentTokenHash) return;
       clearError();
-      try {
-        const resp = await fetch('/admin/invites/' + currentTokenHash, {
-          method: 'DELETE',
-          headers: { 'Authorization': 'Bearer ' + sessionToken },
-        });
-        if (!resp.ok) {
-          const text = await resp.text();
-          if (resp.status === 401 || resp.status === 403) {
-            showError('Access denied. Make sure you are signed in with an admin account.');
-          } else if (resp.status === 404) {
-            showError('Invite not found. It may have already expired.');
-          } else if (resp.status === 409) {
-            showError('Invite has already been used or revoked.');
-          } else {
-            showError('Could not revoke invite: ' + text.trim());
+
+      // Build the inline confirm prompt — matches the pattern used in grant/key revoke flows.
+      const prompt = document.createElement('div');
+      prompt.className = 'confirm-row';
+      prompt.setAttribute('role', 'group');
+      prompt.setAttribute('aria-label', 'Confirm: revoke invite');
+
+      const msg = document.createElement('p');
+      msg.textContent = 'The link will stop working immediately. A new invite will need to be generated.';
+      prompt.appendChild(msg);
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.className = 'confirm-btn';
+      confirmBtn.textContent = 'Confirm revoke';
+      prompt.appendChild(confirmBtn);
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'cancel-btn';
+      cancelBtn.textContent = 'Cancel';
+      prompt.appendChild(cancelBtn);
+
+      // Replace the Revoke invite button with the confirm prompt.
+      revokeBtn.replaceWith(prompt);
+      confirmBtn.focus();
+
+      // Cancel: restore the Revoke invite button and return focus to it.
+      cancelBtn.addEventListener('click', function() {
+        prompt.replaceWith(revokeBtn);
+        revokeBtn.focus();
+      });
+
+      // Confirm: DELETE /admin/invites/{hash}.
+      confirmBtn.addEventListener('click', async function() {
+        clearError();
+        confirmBtn.setAttribute('aria-disabled', 'true');
+        confirmBtn.textContent = 'Revoking…';
+        cancelBtn.setAttribute('aria-disabled', 'true');
+        try {
+          const resp = await fetch('/admin/invites/' + currentTokenHash, {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + sessionToken },
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            prompt.replaceWith(revokeBtn);
+            if (resp.status === 401 || resp.status === 403) {
+              showError('Access denied. Make sure you are signed in with an admin account.');
+            } else if (resp.status === 404) {
+              showError('Invite not found. It may have already expired.');
+            } else if (resp.status === 409) {
+              showError('Invite has already been used or revoked.');
+            } else {
+              showError('Could not revoke invite: ' + text.trim());
+            }
+            return;
           }
-          revokeBtn.setAttribute('aria-disabled', 'false');
-          return;
+          // Success — clear the invite and show the revoked notice.
+          urlEl.textContent = '';
+          copyBtn.hidden = true;
+          prompt.remove();
+          expiresEl.textContent = '';
+          revokedNotice.hidden = false;
+          currentTokenHash = null;
+        } catch (_) {
+          prompt.replaceWith(revokeBtn);
+          showError('Something went wrong. Try again.');
         }
-        // Success — mark as revoked in the UI.
-        urlEl.textContent = '';
-        copyBtn.hidden = true;
-        revokeBtn.hidden = true;
-        expiresEl.textContent = '';
-        revokedNotice.hidden = false;
-        currentTokenHash = null;
-      } catch (_) {
-        showError('Something went wrong. Try again.');
-        revokeBtn.setAttribute('aria-disabled', 'false');
-      }
+      });
     });
   </script>
   <script src="/lucos_navbar.js" type="text/javascript" nonce="{{.Nonce}}"></script>
