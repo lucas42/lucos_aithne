@@ -112,29 +112,6 @@ func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter 
 	}
 }
 
-// handleClientCredentials wraps handleClientCredentialsGrant as an http.HandlerFunc,
-// enforcing POST method and grant_type=client_credentials before delegating.
-// Retained for use in tests that exercise the client_credentials path directly.
-func handleClientCredentials(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if err := r.ParseForm(); err != nil {
-			writeTokenError(w, http.StatusBadRequest, "invalid_request", "could not parse form body")
-			return
-		}
-		grantType := r.FormValue("grant_type")
-		if grantType != "client_credentials" {
-			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
-				fmt.Sprintf("unsupported grant_type %q; only client_credentials is supported", grantType))
-			return
-		}
-		handleClientCredentialsGrant(s, issuer, environment, tokenLimiter, w, r)
-	}
-}
-
 // parseScopeParam splits an OAuth2 scope string (space-delimited per RFC 6749 §3.3)
 // into a deduplicated, order-preserved slice of non-empty scope tokens.
 // Returns nil when s is empty or whitespace-only (treated as "scope omitted").
