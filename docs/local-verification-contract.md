@@ -28,7 +28,7 @@ All standard JWT claims below are required unless marked optional.
 | `iat` | NumericDate | Issued-at timestamp (Unix seconds). |
 | `exp` | NumericDate | Expiry timestamp (Unix seconds). |
 | `jti` | string | Unique token ID — UUID v4. Consumers MAY use this for deduplication or audit logging. |
-| `principal_class` | string | `"human"` or `"agent"`. Use this to distinguish identity types before interpreting `sub`. |
+| `principal_class` | string | `"human"` or `"agent"`. **Informational** — tells you how to interpret `sub` (see §5). MAY be used for `sub` interpretation and log identification; MUST NOT be used as an authorisation gate, and a token MUST NOT be rejected for an absent or unrecognised value. |
 | `scopes` | string[] | Granted capabilities. May be empty (`[]`). A near-empty scope set is the default-deny baseline. |
 
 ## Validation rules
@@ -144,10 +144,34 @@ EC public key bytes as the HMAC secret. The signing algorithm is fixed by this c
 | `exp` | Must be in the future (with clock-skew tolerance — see §"Clock skew"). |
 | `iat` | Must be in the past (with clock-skew tolerance). |
 
-### 5. Check `principal_class`
+### 5. Treat `principal_class` as informational — do NOT gate on it
 
-Verify that the `principal_class` claim contains a value you recognise (`"human"` or
-`"agent"`). Reject unknown classes.
+`principal_class` (`"human"` or `"agent"`) tells you *how to interpret* `sub`: a
+`lucos_contacts` contact-id for `"human"`, a `lucos_agent` persona slug for `"agent"`.
+It is also useful for log identification. Consumers MAY use it for those purposes.
+
+Consumers **MUST NOT** maintain a hardcoded allowlist of principal classes, and **MUST
+NOT** reject a token solely because its `principal_class` is absent or unrecognised.
+Authorisation is by **scope** (§6), which is the only access-control gate — a principal
+of any class, existing or future, can only reach a resource if it holds the required
+scope, and scopes are granted only by an explicit aithne admin action (ADR-0001 §6). A
+new principal class therefore cannot *silently* gain access: with no grant it receives a
+scopeless token that every default-deny resource rejects. A hardcoded allowlist guards a
+door that scope default-deny already locks, while introducing a worse failure mode — if
+aithne legitimately introduces a new class (e.g. `"service"`), a divergent allowlist in
+each consumer rejects that class **estate-wide** until every consumer is individually
+patched and redeployed. That is the same distributed-allowlist drift hazard this contract
+warns against for the `/_info` path allow-list, and aithne — not each consumer — owns the
+principal-class vocabulary.
+
+**Exception — identity-scoped access.** `principal_class` *is* significant when you
+interpret `sub` for **per-principal** authorisation — e.g. "show me **my** X". There is
+no guarantee `sub` is unique *across* principal classes (a `lucos_contacts` contact-id
+and a `lucos_agent` slug could collide), so a consumer that gates on `sub` identity MUST
+also check `principal_class` to disambiguate *which* principal `sub` refers to. This is
+identity **interpretation**, not an access-control allowlist: you still do not reject a
+token for carrying an unrecognised class — you pair (`principal_class`, `sub`) to identify
+the principal for an ownership check.
 
 ### 6. Apply authorisation
 
@@ -458,4 +482,6 @@ scopesRaw, _ := tok.Get("scopes")          // []interface{} — cast to []string
 For other languages, use the corresponding JOSE/JWT library (e.g. `node-jose` or
 `jose` for Node.js; `PyJWT` + `cryptography` for Python; `nimbus-jose-jwt` for Java).
 The validation steps are the same — the library handles the JWS signature; you check
-`iss`, `aud`, `exp`, `principal_class`, and `scopes` yourself.
+`iss`, `aud`, and `exp` yourself, then apply scope-based authorisation (§6). `scopes` is
+the access-control gate; `principal_class` is read for `sub` interpretation and logging
+only, never as an authorisation check (§5).
