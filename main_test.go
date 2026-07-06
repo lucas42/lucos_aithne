@@ -3617,6 +3617,134 @@ func TestOAuth2Token_AuthCodeGrant_IdTokenHasCorrectAudience(t *testing.T) {
 	}
 }
 
+// TestOAuth2Token_AuthCodeGrant_IdTokenHasScopes verifies that the id_token
+// carries the same requested-∩-granted effectiveScopes subset as the access
+// token, so a generic OIDC RP (which authenticates off the id_token, not the
+// aithne-specific access token) has something to gate on (lucos_aithne#277).
+func TestOAuth2Token_AuthCodeGrant_IdTokenHasScopes(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-idtoken-scopes", []string{"https://rp.test/cb"})
+
+	// Grant two scopes, but only request (and thus expect) one of them.
+	cookie := mintSessionCookie(t, s, "heidi")
+	principal, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, "heidi")
+	if err != nil {
+		t.Fatalf("get principal: %v", err)
+	}
+	if _, err := s.CreateGrant(principal.ID, "aithne:admin", "development", "test", testMainVocab); err != nil {
+		t.Fatalf("grant aithne:admin: %v", err)
+	}
+	if _, err := s.CreateGrant(principal.ID, "render-ui", "development", "test", testMainVocab); err != nil {
+		t.Fatalf("grant render-ui: %v", err)
+	}
+
+	authURL := "/oauth2/authorize?response_type=code&client_id=rp-idtoken-scopes" +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb") +
+		"&scope=" + url.QueryEscape("openid render-ui") +
+		"&state=s&nonce=n"
+	req := httptest.NewRequest(http.MethodGet, authURL, nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("authorize: expected 302, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	u, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	code := u.Query().Get("code")
+	if code == "" {
+		t.Fatalf("no code in redirect: %s", rr.Header().Get("Location"))
+	}
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-idtoken-scopes&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRR := httptest.NewRecorder()
+	mux.ServeHTTP(tokenRR, tokenReq)
+	if tokenRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", tokenRR.Code, tokenRR.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(tokenRR.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	idTokenStr, _ := resp["id_token"].(string)
+	if idTokenStr == "" {
+		t.Fatal("id_token must not be empty")
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	idClaims, err := token.ParseSession(idTokenStr, keySet, testIssuer, "rp-idtoken-scopes")
+	if err != nil {
+		t.Fatalf("ParseSession(id_token): %v", err)
+	}
+	if len(idClaims.Scopes) != 1 || idClaims.Scopes[0] != "render-ui" {
+		t.Errorf("id_token scopes: got %v, want [render-ui] (aithne:admin was granted but not requested)", idClaims.Scopes)
+	}
+}
+
+// TestOAuth2Token_AuthCodeGrant_IdTokenScopesEmptyForZeroGrantPrincipal verifies
+// that a principal with no grants still receives a valid id_token — issuance is
+// never gated on scopes (ADR-0001 §6) — carrying an empty (not nil/absent) scopes claim.
+func TestOAuth2Token_AuthCodeGrant_IdTokenScopesEmptyForZeroGrantPrincipal(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-zero-grant", []string{"https://rp.test/cb"})
+	// "ivan" has no grants at all — only requests the OIDC-protocol "openid" scope.
+	code := issueAuthCode(t, s, mux, "rp-zero-grant", "https://rp.test/cb", "ivan", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-zero-grant&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (issuance must not be gated on scopes), got %d — body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	json.NewDecoder(rr.Body).Decode(&resp)
+	idTokenStr, _ := resp["id_token"].(string)
+	if idTokenStr == "" {
+		t.Fatal("id_token must not be empty even for a zero-grant principal")
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	idClaims, err := token.ParseSession(idTokenStr, keySet, testIssuer, "rp-zero-grant")
+	if err != nil {
+		t.Fatalf("ParseSession(id_token): %v", err)
+	}
+	if len(idClaims.Scopes) != 0 {
+		t.Errorf("id_token scopes: got %v, want empty (no grants held)", idClaims.Scopes)
+	}
+}
+
 func TestOAuth2Token_AuthCodeGrant_ReplayRejected(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
@@ -3806,6 +3934,81 @@ func TestUserinfo_ValidToken_ReturnsClaims(t *testing.T) {
 	}
 	if resp["principal_class"] == "" {
 		t.Error("userinfo must include principal_class")
+	}
+}
+
+// TestUserinfo_ReturnsScopes verifies that /oauth2/userinfo surfaces the same
+// scopes claim already carried by the presented access token, so a generic
+// OIDC RP querying userinfo (rather than decoding the id_token) has the same
+// information available (lucos_aithne#277).
+func TestUserinfo_ReturnsScopes(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{"render-ui", "aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	scopesRaw, ok := resp["scopes"].([]any)
+	if !ok {
+		t.Fatalf("userinfo scopes: got %v (%T), want a JSON array", resp["scopes"], resp["scopes"])
+	}
+	got := make([]string, 0, len(scopesRaw))
+	for _, sc := range scopesRaw {
+		got = append(got, fmt.Sprintf("%v", sc))
+	}
+	want := []string{"render-ui", "aithne:admin"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("userinfo scopes: got %v, want %v", got, want)
+	}
+}
+
+// TestUserinfo_ScopesEmptyForZeroGrantPrincipal verifies userinfo returns an
+// empty (not absent) scopes array for a principal with no granted scopes.
+func TestUserinfo_ScopesEmptyForZeroGrantPrincipal(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{})
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	scopesRaw, ok := resp["scopes"].([]any)
+	if !ok {
+		t.Fatalf("userinfo scopes: got %v (%T), want a JSON array", resp["scopes"], resp["scopes"])
+	}
+	if len(scopesRaw) != 0 {
+		t.Errorf("userinfo scopes: got %v, want empty array", scopesRaw)
 	}
 }
 

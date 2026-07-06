@@ -256,16 +256,26 @@ func JWKSHandler(getKeys func() ([]*store.SigningKey, error)) http.HandlerFunc {
 // principal class so the RP can distinguish human from agent subjects.
 // The ID token is separate from the access token — the access token uses
 // audience "l42.eu" for estate-wide verification; the ID token uses the client_id.
+//
+// scopes is the requested-∩-granted scope subset (the same effectiveScopes set
+// stamped onto the access token — see MintSession) and is embedded under the
+// same ClaimScopes claim so a generic OIDC RP can gate on it (lucos_aithne#277).
+// Per ADR-0001 §6, issuance is never gated on scopes: a zero-grant principal
+// still receives a valid id_token carrying an empty scopes claim.
 func MintIDToken(
 	p *store.Principal,
 	clientID string,
 	nonce string,
+	scopes []string,
 	signingKey *store.SigningKey,
 	issuer string,
 	ttl time.Duration,
 ) (string, error) {
 	if ttl <= 0 {
 		ttl = DefaultSessionTTL
+	}
+	if scopes == nil {
+		scopes = []string{}
 	}
 
 	privKeyRaw, err := x509.ParsePKCS8PrivateKey(signingKey.PrivateKey)
@@ -298,7 +308,8 @@ func MintIDToken(
 		IssuedAt(now).
 		Expiration(now.Add(ttl)).
 		JwtID(jti).
-		Claim(ClaimPrincipalClass, string(p.Class))
+		Claim(ClaimPrincipalClass, string(p.Class)).
+		Claim(ClaimScopes, scopes)
 
 	// Embed nonce if provided — required for replay protection when the RP
 	// supplied it in the authorization request (OIDC Core §3.1.3.7).
