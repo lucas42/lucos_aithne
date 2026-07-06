@@ -82,7 +82,7 @@ func handleOpenIDConfiguration(issuer string) http.HandlerFunc {
 		SubjectTypesSupported:             []string{"public"},
 		IDTokenSigningAlgValuesSupported:  []string{"ES256"},
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
-		ClaimsSupported:                   []string{"iss", "sub", "aud", "exp", "iat", "jti", "nonce", "principal_class", "name"},
+		ClaimsSupported:                   []string{"iss", "sub", "aud", "exp", "iat", "jti", "nonce", "principal_class", "name", "scopes"},
 	}
 	b, _ := json.Marshal(doc) // static; marshal once at construction
 
@@ -387,7 +387,10 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	}
 
 	// Mint the OIDC ID token — audience is the client_id, nonce forwarded.
-	idToken, err := token.MintIDToken(principal, clientID, authCode.Nonce, signingKey, issuer, 0)
+	// Carries the same effective (narrowed) scope set as the access token, so a
+	// generic OIDC RP (which authenticates off the id_token, not the access
+	// token) has something to gate on (lucos_aithne#277).
+	idToken, err := token.MintIDToken(principal, clientID, authCode.Nonce, effectiveScopes, signingKey, issuer, 0)
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: mint id_token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
@@ -445,9 +448,14 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 			return
 		}
 
+		// claims.Scopes is already the requested-∩-granted effectiveScopes set —
+		// ParseSession extracts it from the access token's own "scopes" claim
+		// (stamped by MintSession in handleAuthCodeGrant/handleClientCredentialsGrant),
+		// so no re-derivation is needed here (lucos_aithne#277).
 		resp := map[string]any{
 			"sub":             claims.Subject,
 			"principal_class": string(claims.PrincipalClass),
+			"scopes":          claims.Scopes,
 		}
 
 		// Attempt to enrich with profile data from lucos_contacts for human principals.
