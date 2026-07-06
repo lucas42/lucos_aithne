@@ -3416,10 +3416,17 @@ func TestAuthorize_MethodNotAllowed(t *testing.T) {
 // extracts the issued code from the redirect location.
 func issueAuthCode(t *testing.T, s *store.Store, mux *http.ServeMux, clientID, redirectURI, contactID, state, nonce string) string {
 	t.Helper()
+	return issueAuthCodeWithScope(t, s, mux, clientID, redirectURI, contactID, state, nonce, "openid")
+}
+
+// issueAuthCodeWithScope is like issueAuthCode but lets the caller control the
+// requested scope string (space-delimited; url.QueryEscape encodes the space as "+").
+func issueAuthCodeWithScope(t *testing.T, s *store.Store, mux *http.ServeMux, clientID, redirectURI, contactID, state, nonce, scope string) string {
+	t.Helper()
 	cookie := mintSessionCookie(t, s, contactID)
 	authURL := "/oauth2/authorize?response_type=code&client_id=" + url.QueryEscape(clientID) +
 		"&redirect_uri=" + url.QueryEscape(redirectURI) +
-		"&scope=openid" +
+		"&scope=" + url.QueryEscape(scope) +
 		"&state=" + url.QueryEscape(state) +
 		"&nonce=" + url.QueryEscape(nonce)
 	req := httptest.NewRequest(http.MethodGet, authURL, nil)
@@ -3427,15 +3434,15 @@ func issueAuthCode(t *testing.T, s *store.Store, mux *http.ServeMux, clientID, r
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusFound {
-		t.Fatalf("issueAuthCode: expected 302, got %d — body: %s", rr.Code, rr.Body.String())
+		t.Fatalf("issueAuthCodeWithScope: expected 302, got %d — body: %s", rr.Code, rr.Body.String())
 	}
 	u, err := url.Parse(rr.Header().Get("Location"))
 	if err != nil {
-		t.Fatalf("issueAuthCode: parse redirect: %v", err)
+		t.Fatalf("issueAuthCodeWithScope: parse redirect: %v", err)
 	}
 	code := u.Query().Get("code")
 	if code == "" {
-		t.Fatalf("issueAuthCode: no code in redirect: %s", rr.Header().Get("Location"))
+		t.Fatalf("issueAuthCodeWithScope: no code in redirect: %s", rr.Header().Get("Location"))
 	}
 	return code
 }
@@ -3477,6 +3484,87 @@ func TestOAuth2Token_AuthCodeGrant_Success(t *testing.T) {
 	}
 	if resp["token_type"] != "Bearer" {
 		t.Errorf("token_type: got %v, want Bearer", resp["token_type"])
+	}
+}
+
+// TestOAuth2Token_AuthCodeGrant_ScopeNarrowing verifies that the access token
+// only carries the subset of the principal's granted scopes that the client
+// actually requested at /oauth2/authorize (lucos_aithne#258) — not the
+// principal's full grant-store scope set.
+func TestOAuth2Token_AuthCodeGrant_ScopeNarrowing(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-narrow", []string{"https://rp.test/cb"})
+
+	// Grant the principal two scopes, but only request one of them.
+	cookie := mintSessionCookie(t, s, "grace")
+	principal, err := s.GetPrincipalByExternalID(store.PrincipalClassHuman, "grace")
+	if err != nil {
+		t.Fatalf("get principal: %v", err)
+	}
+	if _, err := s.CreateGrant(principal.ID, "aithne:admin", "development", "test", testMainVocab); err != nil {
+		t.Fatalf("grant aithne:admin: %v", err)
+	}
+	if _, err := s.CreateGrant(principal.ID, "render-ui", "development", "test", testMainVocab); err != nil {
+		t.Fatalf("grant render-ui: %v", err)
+	}
+
+	authURL := "/oauth2/authorize?response_type=code&client_id=rp-narrow" +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb") +
+		"&scope=" + url.QueryEscape("openid render-ui") +
+		"&state=s&nonce=n"
+	req := httptest.NewRequest(http.MethodGet, authURL, nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("authorize: expected 302, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	u, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	code := u.Query().Get("code")
+	if code == "" {
+		t.Fatalf("no code in redirect: %s", rr.Header().Get("Location"))
+	}
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-narrow&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRR := httptest.NewRecorder()
+	mux.ServeHTTP(tokenRR, tokenReq)
+	if tokenRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", tokenRR.Code, tokenRR.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(tokenRR.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	accessToken, _ := resp["access_token"].(string)
+	if accessToken == "" {
+		t.Fatal("access_token must not be empty")
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(accessToken, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "render-ui" {
+		t.Errorf("access_token scopes: got %v, want [render-ui] (aithne:admin was granted but not requested)", claims.Scopes)
 	}
 }
 

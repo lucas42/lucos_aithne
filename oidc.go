@@ -349,11 +349,25 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	}
 
 	// Collect active scopes (aithne authorisation scopes, not OIDC scopes).
-	scopes, err := s.GetActiveScopes(principal.ID, environment)
+	granted, err := s.GetActiveScopes(principal.ID, environment)
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: get scopes for %s: %v", principal.ID, err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
 		return
+	}
+
+	// Narrow the token's scopes to the subset the client actually requested at
+	// /oauth2/authorize (RFC 6749 §3.3, OIDC Core §5.4), rather than always
+	// stamping the principal's full granted set. OIDC-protocol scopes such as
+	// "openid"/"profile"/"email" are never present in the grant store, so they
+	// drop out of this intersection naturally — no special-casing required.
+	grantedSet := toSet(granted)
+	requestedScopes := parseScopeParam(authCode.Scope)
+	effectiveScopes := make([]string, 0, len(requestedScopes))
+	for _, sc := range requestedScopes {
+		if grantedSet[sc] {
+			effectiveScopes = append(effectiveScopes, sc)
+		}
 	}
 
 	signingKey, err := s.GetOrCreateActiveSigningKey()
@@ -364,8 +378,8 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	}
 
 	// Mint the access token — same session JWT format as all other flows
-	// (audience "l42.eu", carries aithne scopes from the grant store).
-	accessToken, err := token.MintSession(principal, scopes, signingKey, issuer, "l42.eu", 0)
+	// (audience "l42.eu"), carrying only the effective (narrowed) scope set.
+	accessToken, err := token.MintSession(principal, effectiveScopes, signingKey, issuer, "l42.eu", 0)
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: mint access token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
