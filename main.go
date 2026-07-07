@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -350,6 +351,50 @@ func parseClientKeysBySystem(raw string) map[string]string {
 	return secrets
 }
 
+// isLoopbackRedirectURI reports whether uri's host is a loopback address —
+// literally "localhost", or an IP for which net.IP.IsLoopback() is true
+// (covers the whole 127.0.0.0/8 range and ::1). An unparseable URI is
+// conservatively treated as non-loopback — filtering is a defence-in-depth
+// narrowing, not primary validation (handleAuthorize/HasRedirectURI still do
+// exact-match validation against whatever ends up stored).
+func isLoopbackRedirectURI(rawURI string) bool {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// filterRedirectURIsForEnvironment drops loopback redirect_uris (lucos_aithne#291)
+// unless environment is "development". A single committed manifest declares
+// redirect_uris for every environment a client operates in (ADR-0004 — there is
+// deliberately no per-environment manifest split), so a client's entry can
+// legitimately list both a prod domain and a dev loopback callback. Without this
+// filter, reconcile in production would register the loopback redirect_uri too,
+// needlessly widening production's registered-client surface. Dropped URIs are
+// logged, never cause the reconcile to fail.
+func filterRedirectURIsForEnvironment(clientID string, redirectURIs []string, environment string) []string {
+	if environment == "development" {
+		return redirectURIs
+	}
+	filtered := make([]string, 0, len(redirectURIs))
+	for _, uri := range redirectURIs {
+		if isLoopbackRedirectURI(uri) {
+			log.Printf("oidc client reconcile: dropping loopback redirect_uri %q for client %q in environment %q", uri, clientID, environment)
+			continue
+		}
+		filtered = append(filtered, uri)
+	}
+	return filtered
+}
+
 // reconcileOIDCClients upserts the OIDC clients declared in the committed
 // manifest, matching each against a secret in CLIENT_KEYS (ADR-0004). It is
 // called at startup, alongside bootstrapAdmin.
@@ -360,7 +405,10 @@ func parseClientKeysBySystem(raw string) map[string]string {
 // otherwise wipe every client if the manifest or CLIENT_KEYS is briefly
 // missing at startup). A declared client with no matching CLIENT_KEYS secret
 // is skipped and logged rather than half-registered.
-func reconcileOIDCClients(s *store.Store, manifestJSON []byte, clientKeysRaw string) {
+//
+// environment gates loopback redirect_uri filtering (lucos_aithne#291) — see
+// filterRedirectURIsForEnvironment.
+func reconcileOIDCClients(s *store.Store, manifestJSON []byte, clientKeysRaw, environment string) {
 	entries, err := parseOIDCClientManifest(manifestJSON)
 	if err != nil {
 		log.Printf("oidc client reconcile: %v — skipping reconcile", err)
@@ -378,8 +426,9 @@ func reconcileOIDCClients(s *store.Store, manifestJSON []byte, clientKeysRaw str
 			log.Printf("oidc client reconcile: no CLIENT_KEYS secret for declared client %q — skipping", entry.ClientID)
 			continue
 		}
+		redirectURIs := filterRedirectURIsForEnvironment(entry.ClientID, entry.RedirectURIs, environment)
 		secretHash := hashOIDCSecret(secret)
-		if _, err := s.UpsertOIDCClient(entry.ClientID, secretHash, entry.ClientName, entry.RedirectURIs); err != nil {
+		if _, err := s.UpsertOIDCClient(entry.ClientID, secretHash, entry.ClientName, redirectURIs); err != nil {
 			log.Printf("oidc client reconcile: upsert %q: %v", entry.ClientID, err)
 			continue
 		}
@@ -1581,7 +1630,7 @@ func main() {
 
 	// Reconcile OIDC clients from the committed oidc_clients.json manifest
 	// (ADR-0004). Upsert-only — see reconcileOIDCClients doc comment.
-	reconcileOIDCClients(s, oidcClientsJSON, os.Getenv("CLIENT_KEYS"))
+	reconcileOIDCClients(s, oidcClientsJSON, os.Getenv("CLIENT_KEYS"), environment)
 
 	// Initialise the lucos_contacts client for contact verification and name lookup.
 	contactsOrigin := getEnvRequired("LUCOS_CONTACTS_ORIGIN")

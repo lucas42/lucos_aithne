@@ -4133,7 +4133,7 @@ func TestReconcileOIDCClients_UpsertsMatchedClient(t *testing.T) {
 	defer s.Close()
 
 	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
-	reconcileOIDCClients(s, manifest, "lucos_worlds:development=the-secret")
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=the-secret", "development")
 
 	client, err := s.GetOIDCClient("lucos_worlds")
 	if err != nil {
@@ -4155,7 +4155,7 @@ func TestReconcileOIDCClients_SkipsDeclaredClientWithNoSecret(t *testing.T) {
 	defer s.Close()
 
 	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
-	reconcileOIDCClients(s, manifest, "") // no CLIENT_KEYS secret for lucos_worlds
+	reconcileOIDCClients(s, manifest, "", "development") // no CLIENT_KEYS secret for lucos_worlds
 
 	if _, err := s.GetOIDCClient("lucos_worlds"); err != store.ErrNotFound {
 		t.Errorf("expected ErrNotFound (client skipped, not half-registered), got %v", err)
@@ -4170,7 +4170,7 @@ func TestReconcileOIDCClients_EmptyManifestSkipsReconcile(t *testing.T) {
 	defer s.Close()
 	createTestOIDCClient(t, s, "existing-rp", []string{"https://rp.test/cb"})
 
-	reconcileOIDCClients(s, []byte(`[]`), "lucos_worlds:development=secret")
+	reconcileOIDCClients(s, []byte(`[]`), "lucos_worlds:development=secret", "development")
 
 	// Pre-existing rows must be untouched — an empty manifest never wipes the table.
 	if _, err := s.GetOIDCClient("existing-rp"); err != nil {
@@ -4186,7 +4186,7 @@ func TestReconcileOIDCClients_UnparseableManifestSkipsReconcile(t *testing.T) {
 	defer s.Close()
 	createTestOIDCClient(t, s, "existing-rp", []string{"https://rp.test/cb"})
 
-	reconcileOIDCClients(s, []byte(`not json`), "lucos_worlds:development=secret")
+	reconcileOIDCClients(s, []byte(`not json`), "lucos_worlds:development=secret", "development")
 
 	if _, err := s.GetOIDCClient("existing-rp"); err != nil {
 		t.Errorf("expected existing-rp to survive an unparseable-manifest reconcile, got: %v", err)
@@ -4201,8 +4201,8 @@ func TestReconcileOIDCClients_IdempotentOnRerun(t *testing.T) {
 	defer s.Close()
 
 	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
-	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v1")
-	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v2") // simulates a rotated secret
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v1", "development")
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v2", "development") // simulates a rotated secret
 
 	clients, err := s.ListOIDCClients()
 	if err != nil {
@@ -4213,6 +4213,88 @@ func TestReconcileOIDCClients_IdempotentOnRerun(t *testing.T) {
 	}
 	if clients[0].SecretHash != hashOIDCSecret("secret-v2") {
 		t.Errorf("expected secret_hash to reflect the latest reconcile, got %q", clients[0].SecretHash)
+	}
+}
+
+// --- Environment-scoped redirect_uri filtering tests (lucos_aithne#291) ---
+
+func TestIsLoopbackRedirectURI(t *testing.T) {
+	loopback := []string{
+		"http://localhost:8028/oauth2/callback",
+		"http://127.0.0.1:8028/oauth2/callback",
+		"http://127.0.0.5:8080/cb", // whole 127.0.0.0/8 range, not just .1
+		"http://[::1]:8028/oauth2/callback",
+	}
+	for _, uri := range loopback {
+		if !isLoopbackRedirectURI(uri) {
+			t.Errorf("isLoopbackRedirectURI(%q) = false, want true", uri)
+		}
+	}
+
+	notLoopback := []string{
+		"https://locations.l42.eu/oauth2/callback",
+		"https://worlds.l42.eu/cb",
+		"http://192.168.1.5:8028/cb", // private but not loopback
+		"not a uri at all",
+	}
+	for _, uri := range notLoopback {
+		if isLoopbackRedirectURI(uri) {
+			t.Errorf("isLoopbackRedirectURI(%q) = true, want false", uri)
+		}
+	}
+}
+
+func TestFilterRedirectURIsForEnvironment_DevelopmentPassesThrough(t *testing.T) {
+	uris := []string{"https://worlds.l42.eu/cb", "http://localhost:8080/cb"}
+	got := filterRedirectURIsForEnvironment("lucos_worlds", uris, "development")
+	if len(got) != 2 {
+		t.Fatalf("expected both URIs to pass through in development, got %v", got)
+	}
+}
+
+func TestFilterRedirectURIsForEnvironment_ProductionDropsLoopback(t *testing.T) {
+	uris := []string{"https://worlds.l42.eu/cb", "http://localhost:8080/cb", "http://127.0.0.1:8080/cb"}
+	got := filterRedirectURIsForEnvironment("lucos_worlds", uris, "production")
+	if len(got) != 1 || got[0] != "https://worlds.l42.eu/cb" {
+		t.Errorf("expected only the non-loopback URI to survive in production, got %v", got)
+	}
+}
+
+func TestReconcileOIDCClients_ProductionDropsLoopbackRedirectURI(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	manifest := []byte(`[{"client_id": "lucos_locations", "client_name": "OwnTracks", "redirect_uris": ["https://locations.l42.eu/oauth2/callback", "http://localhost:8028/oauth2/callback"]}]`)
+	reconcileOIDCClients(s, manifest, "lucos_locations:production=prod-secret", "production")
+
+	client, err := s.GetOIDCClient("lucos_locations")
+	if err != nil {
+		t.Fatalf("expected client to be upserted, got: %v", err)
+	}
+	if len(client.RedirectURIs) != 1 || client.RedirectURIs[0] != "https://locations.l42.eu/oauth2/callback" {
+		t.Errorf("expected only the prod redirect_uri to be registered in production, got %v", client.RedirectURIs)
+	}
+}
+
+func TestReconcileOIDCClients_DevelopmentKeepsLoopbackRedirectURI(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	manifest := []byte(`[{"client_id": "lucos_locations", "client_name": "OwnTracks", "redirect_uris": ["https://locations.l42.eu/oauth2/callback", "http://localhost:8028/oauth2/callback"]}]`)
+	reconcileOIDCClients(s, manifest, "lucos_locations:development=dev-secret", "development")
+
+	client, err := s.GetOIDCClient("lucos_locations")
+	if err != nil {
+		t.Fatalf("expected client to be upserted, got: %v", err)
+	}
+	if len(client.RedirectURIs) != 2 {
+		t.Errorf("expected both redirect_uris to be registered in development, got %v", client.RedirectURIs)
 	}
 }
 
