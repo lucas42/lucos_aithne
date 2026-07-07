@@ -54,7 +54,7 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - The manual `POST /admin/oidc-clients` endpoint is **removed entirely.** The startup reconcile from the manifest becomes the **sole** OIDC-client registration path.
 - Rationale (lucas42, PR review): the estate already has a break-glass admin workflow via `BOOTSTRAP_ADMIN_CONTACT_ID`; a second `aithne:admin`-gated admin write-surface adds no value over it and is unnecessary attack surface on the auth service.
 - Scope note: only the HTTP admin **endpoint and its route** are removed. The underlying store capability to write a client row remains — the reconcile upsert is built on it.
-- Note: `GET`/`POST`/`DELETE /admin/oidc-clients` share one handler/route, so this also removes the online `DELETE` (client revocation/deletion) path. See Consequences → Negative for how revocation is handled afterwards, and Deferred work for the keep-a-narrow-`DELETE` decision.
+- Note: `GET`/`POST`/`DELETE /admin/oidc-clients` share one handler/route, so this also removes the online `DELETE` (client revocation/deletion) path. See Consequences → Negative for how revocation is handled afterwards, and Alternatives considered for why a narrow revocation-only `DELETE` was declined.
 
 ## Consequences
 
@@ -70,7 +70,7 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - aithne now consumes `CLIENT_KEYS` — a small conceptual overlap, repurposing creds' bearer-key plumbing as the distribution channel for an OIDC secret. Legitimate (creds is the estate secret store; a shared OIDC secret is a secret) but worth naming.
 - Registering a new client is now **two steps** — add to the manifest (a PR) *and* create the `=>` linked credential (one ssh line) — versus a single `POST`. Both are familiar, reviewable, reproducible estate operations, but it is more steps.
 - Upsert-only reconcile means **removing** a client is not automated — a deliberate safety trade (§3).
-- **Removing the endpoint removes online *revocation/deletion*, not just registration.** `GET`/`POST`/`DELETE /admin/oidc-clients` are one handler on one route (`main.go`, `oidc.go`), so §5 drops `DELETE` with them. Combined with §3's never-delete reconcile, no HTTP path remains to revoke or delete a client post-merge. Routine secret **rotation** is still available without host access — rotate the linked credential (§4) and the old secret stops validating on the next reconcile/redeploy (deploy-gated, not instant). But **immediate revocation or full client removal** requires host-level DB access (`docker exec` + SQLite) — the ADR-0002 break-glass tier (not a new trust boundary), a step down in friction/auditability from today's scoped, audited API call. Whether to keep a narrow, scoped `DELETE /admin/oidc-clients/{id}` revocation-only path instead is left as an implementation-time decision (see Deferred work).
+- **Removing the endpoint removes online *revocation/deletion*, not just registration.** `GET`/`POST`/`DELETE /admin/oidc-clients` are one handler on one route (`main.go`, `oidc.go`), so §5 drops `DELETE` with them. Combined with §3's never-delete reconcile, no HTTP path remains to revoke or delete a client post-merge. Routine secret **rotation** is still available without host access — rotate the linked credential (§4) and the old secret stops validating on the next reconcile/redeploy (deploy-gated, not instant). But **immediate revocation or full client removal** requires host-level DB access (`docker exec` + SQLite) — the ADR-0002 break-glass tier (not a new trust boundary), a step down in friction/auditability from today's scoped, audited API call. A narrow, scoped `DELETE /admin/oidc-clients/{id}` revocation-only path was **considered and declined** in favour of this break-glass tier (see Alternatives considered).
 - Secret rotation carries the standard linked-credential **convergence window** (§4).
 - Client secrets remain **hex SHA-256 (unsalted)** — unchanged from today; acceptable because the secrets are high-entropy random, but noted as inherited rather than improved.
 
@@ -79,6 +79,7 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - **Option A — aithne generates the secret and writes it into creds** (matches the literal "pushed into creds" wording). **Rejected by lucas42:** it gives aithne — the estate auth SPOF — automated prod-creds-write, a new high-value trust edge, for no benefit over the read-only model. Recorded so the rejection is on file.
 - **YAML manifest hand-parsed like `scopes.yaml`.** Rejected: the nested structure makes a no-library hand-parser error-prone; stdlib JSON is safer with the same zero-dependency property.
 - **Full declarative reconcile (delete undeclared clients).** Rejected as the default on empty-source-safety grounds (§3).
+- **A narrow revocation-only `DELETE /admin/oidc-clients/{id}`** (raised by lucos-security and lucos-code-reviewer during review, to preserve an online path to revoke a compromised secret). **Declined:** it would reintroduce exactly the `aithne:admin`-gated admin write-surface §5 removes, against lucas42's stated reasoning (break-glass via `BOOTSTRAP_ADMIN_CONTACT_ID` suffices; no value in a second admin surface). Routine secret revocation is met by cred-rotation (§4); immediate revocation / full removal is the accepted host-DB break-glass tier. Revisit only if an operational need for online revocation emerges.
 
 ## Out of scope (explicit)
 
@@ -87,6 +88,5 @@ Extending the same reconcile-from-source pattern to **grants** (`bootstrapAdmin`
 ## Deferred work (to be ticketed on acceptance)
 
 1. **Implement** `oidc_clients.json` + the startup reconcile (embed, stdlib-JSON parse, `CLIENT_KEYS` match, hash, prune-safe skips, and a store upsert method), **and remove the `POST /admin/oidc-clients` endpoint + its route** (§5) — aithne repo.
-2. **Decide** (lucas42 / the implementer, when the endpoint is removed) whether to keep a narrow, scoped `DELETE /admin/oidc-clients/{id}` revocation-only endpoint, or rely on cred-rotation (§4) plus the host-level break-glass for immediate revocation / full removal (Consequences → Negative).
-3. **Reframe** lucas42/lucos_locations#94 (register the owntracks client) onto the new mechanism.
-4. **(Only if lucas42 opts in)** a separate decision for grants-source-control, which would supersede lucas42/lucos_locations#95.
+2. **Reframe** lucas42/lucos_locations#94 (register the owntracks client) onto the new mechanism.
+3. **(Only if lucas42 opts in)** a separate decision for grants-source-control, which would supersede lucas42/lucos_locations#95.
