@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "client_id": "lucos_locations",
+    "client_name": "OwnTracks frontend (lucos_locations)",
+    "redirect_uris": [
+      "https://locations.l42.eu/oauth2/callback",
+      "http://localhost:8028/oauth2/callback"
+    ]
+  }
+]
