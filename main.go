@@ -404,7 +404,9 @@ func filterRedirectURIsForEnvironment(clientID string, redirectURIs []string, en
 // (the lucos_creds#333 empty-source lesson — a delete-on-absence loop would
 // otherwise wipe every client if the manifest or CLIENT_KEYS is briefly
 // missing at startup). A declared client with no matching CLIENT_KEYS secret
-// is skipped and logged rather than half-registered.
+// is skipped and logged rather than half-registered — as is a client whose
+// declared redirect_uris are entirely filtered out for this environment (see
+// below), rather than upserting one with an empty redirect_uris.
 //
 // environment gates loopback redirect_uri filtering (lucos_aithne#291) — see
 // filterRedirectURIsForEnvironment.
@@ -427,6 +429,16 @@ func reconcileOIDCClients(s *store.Store, manifestJSON []byte, clientKeysRaw, en
 			continue
 		}
 		redirectURIs := filterRedirectURIsForEnvironment(entry.ClientID, entry.RedirectURIs, environment)
+		if len(entry.RedirectURIs) > 0 && len(redirectURIs) == 0 {
+			// Every declared redirect_uri was loopback-only and got filtered out for
+			// this environment (e.g. a manifest entry that only declares a dev
+			// callback, reconciled in production). Upserting with an empty
+			// redirect_uris would silently register a client that can never
+			// complete an OAuth flow — skip it instead, same as the no-matching-
+			// secret case above (lucos_aithne#291 review follow-up).
+			log.Printf("oidc client reconcile: all redirect_uris for client %q were filtered out in environment %q — skipping", entry.ClientID, environment)
+			continue
+		}
 		secretHash := hashOIDCSecret(secret)
 		if _, err := s.UpsertOIDCClient(entry.ClientID, secretHash, entry.ClientName, redirectURIs); err != nil {
 			log.Printf("oidc client reconcile: upsert %q: %v", entry.ClientID, err)

@@ -4298,6 +4298,26 @@ func TestReconcileOIDCClients_DevelopmentKeepsLoopbackRedirectURI(t *testing.T) 
 	}
 }
 
+func TestReconcileOIDCClients_SkipsClientWhoseRedirectURIsAreAllFilteredOut(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	// A manifest entry declaring only a loopback redirect_uri, reconciled in
+	// production: filterRedirectURIsForEnvironment strips it to an empty list.
+	// Upserting with no redirect_uris would silently register a client that can
+	// never complete an OAuth flow — it must be skipped instead (code review
+	// follow-up on lucos_aithne#291).
+	manifest := []byte(`[{"client_id": "dev-only-client", "client_name": "Dev Only", "redirect_uris": ["http://localhost:9000/cb"]}]`)
+	reconcileOIDCClients(s, manifest, "dev-only-client:production=secret", "production")
+
+	if _, err := s.GetOIDCClient("dev-only-client"); err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound (client skipped, not registered with empty redirect_uris), got %v", err)
+	}
+}
+
 // ============================================================
 // Bootstrap invite + bootstrapAdmin tests (lucos_aithne#49)
 // ============================================================
