@@ -8,9 +8,11 @@ package main
 //   GET  /.well-known/openid-configuration — OIDC discovery document
 //   GET  /oauth2/authorize                 — authorization-code flow
 //   GET  /oauth2/userinfo                  — OIDC userinfo endpoint
-//   POST /admin/oidc-clients               — register an OIDC relying party (admin)
-//   GET  /admin/oidc-clients               — list registered clients (admin)
-//   DELETE /admin/oidc-clients/{id}        — remove a client (admin)
+//
+// OIDC client registration is not an HTTP endpoint (ADR-0004 §5 removed the
+// admin POST/GET/DELETE /admin/oidc-clients handler): clients are declared in
+// the committed oidc_clients.json manifest and reconciled into the store at
+// startup — see reconcileOIDCClients in main.go.
 //
 // The /oauth2/token endpoint is handled in machine_credentials.go and dispatches
 // to handleAuthCodeGrant (defined here) for the authorization_code grant type.
@@ -474,142 +476,9 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 	}
 }
 
-// --- Admin OIDC client management ---
-
-type createOIDCClientRequest struct {
-	ClientID     string   `json:"client_id"`
-	RedirectURIs []string `json:"redirect_uris"`
-	ClientName   string   `json:"client_name"`
-}
-
-type createOIDCClientResponse struct {
-	ClientID     string    `json:"client_id"`
-	ClientSecret string    `json:"client_secret"`
-	RedirectURIs []string  `json:"redirect_uris"`
-	ClientName   string    `json:"client_name"`
-	CreatedAt    time.Time `json:"created_at"`
-	Note         string    `json:"note"`
-}
-
-type oidcClientJSON struct {
-	ClientID     string    `json:"client_id"`
-	RedirectURIs []string  `json:"redirect_uris"`
-	ClientName   string    `json:"client_name"`
-	CreatedAt    time.Time `json:"created_at"`
-}
-
-// handleAdminOIDCClients serves GET and POST /admin/oidc-clients, and DELETE /admin/oidc-clients/{id}.
-func handleAdminOIDCClients(s *store.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Check if this is /admin/oidc-clients/{id} (DELETE).
-		path := strings.TrimPrefix(r.URL.Path, "/admin/oidc-clients")
-		path = strings.TrimPrefix(path, "/")
-		if path != "" {
-			// Sub-resource: /admin/oidc-clients/{id}
-			if r.Method != http.MethodDelete {
-				http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			err := s.DeleteOIDCClient(path)
-			if errors.Is(err, store.ErrNotFound) {
-				http.Error(w, "404 Not Found", http.StatusNotFound)
-				return
-			}
-			if err != nil {
-				reqLogger(r).Printf("handleAdminOIDCClients: delete %q: %v", path, err)
-				http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		switch r.Method {
-		case http.MethodGet:
-			listOIDCClients(s, w, r)
-		case http.MethodPost:
-			createOIDCClient(s, w, r)
-		default:
-			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}
-}
-
-func listOIDCClients(s *store.Store, w http.ResponseWriter, r *http.Request) {
-	clients, err := s.ListOIDCClients()
-	if err != nil {
-		reqLogger(r).Printf("listOIDCClients: %v", err)
-		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-	result := make([]oidcClientJSON, 0, len(clients))
-	for _, c := range clients {
-		result = append(result, oidcClientJSON{
-			ClientID:     c.ID,
-			RedirectURIs: c.RedirectURIs,
-			ClientName:   c.ClientName,
-			CreatedAt:    c.CreatedAt,
-		})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
-func createOIDCClient(s *store.Store, w http.ResponseWriter, r *http.Request) {
-	var req createOIDCClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "400 Bad Request — invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if req.ClientID == "" {
-		http.Error(w, "400 Bad Request — client_id is required", http.StatusBadRequest)
-		return
-	}
-	if len(req.RedirectURIs) == 0 {
-		http.Error(w, "400 Bad Request — at least one redirect_uri is required", http.StatusBadRequest)
-		return
-	}
-	for _, uri := range req.RedirectURIs {
-		parsed, err := url.ParseRequestURI(uri)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-			http.Error(w, "400 Bad Request — redirect_uris must be valid http/https URLs", http.StatusBadRequest)
-			return
-		}
-	}
-
-	// Generate a raw secret; only the hash is stored.
-	rawSecret, err := store.GenerateRawCode()
-	if err != nil {
-		reqLogger(r).Printf("createOIDCClient: generate secret: %v", err)
-		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-	secretHash := hashOIDCSecret(rawSecret)
-
-	client, err := s.CreateOIDCClient(req.ClientID, secretHash, req.ClientName, req.RedirectURIs)
-	if errors.Is(err, store.ErrDuplicate) {
-		http.Error(w, "409 Conflict — client_id already registered", http.StatusConflict)
-		return
-	}
-	if err != nil {
-		reqLogger(r).Printf("createOIDCClient: create: %v", err)
-		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(createOIDCClientResponse{
-		ClientID:     client.ID,
-		ClientSecret: rawSecret,
-		RedirectURIs: client.RedirectURIs,
-		ClientName:   client.ClientName,
-		CreatedAt:    client.CreatedAt,
-		Note:         "Store client_secret immediately — it is shown only once and not stored by aithne.",
-	})
-}
-
 // hashOIDCSecret returns the hex-encoded SHA-256 of the raw OIDC client secret.
+// Used both by the (removed) admin registration path's successor — the startup
+// manifest reconcile in main.go — to hash the CLIENT_KEYS-delivered secret.
 func hashOIDCSecret(rawSecret string) string {
 	sum := sha256.Sum256([]byte(rawSecret))
 	return hex.EncodeToString(sum[:])
