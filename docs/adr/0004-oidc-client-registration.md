@@ -38,6 +38,8 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - For each **declared** client: read its creds-delivered secret from `CLIENT_KEYS` (matched by `clientsystem` == `client_id`), compute hex SHA-256 (the same scheme used today), and **upsert** `(id, secret_hash, redirect_uris, client_name)`. Implementation adds an INSERT-or-UPDATE store method; today the store has only `CreateOIDCClient` / `DeleteOIDCClient`.
 - aithne reads a **new environment variable, `CLIENT_KEYS`** — not currently consumed by aithne. It remains **read-only** against creds; no write capability is introduced.
 
+> **Amendment (2026-07-07, [lucos_aithne#291](https://github.com/lucas42/lucos_aithne/issues/291)): loopback `redirect_uris` are filtered out of non-development reconciles.** See [Amendment — 2026-07-07](#amendment--2026-07-07-environment-scoped-redirect_uri-filtering) below.
+
 ### 3. Prune-safety — upsert-only, skip-never-wipe
 
 - Reconcile **never deletes.** It upserts declared clients and leaves any undeclared table rows in place, logged loudly as orphans. Rationale is the creds#333 empty-source lesson: a delete-on-absence loop wipes everything if the manifest is empty/unreadable or `CLIENT_KEYS` is absent at startup — and deleting an OIDC client instantly breaks an RP's login.
@@ -90,3 +92,11 @@ Extending the same reconcile-from-source pattern to **grants** (`bootstrapAdmin`
 1. **Implement** `oidc_clients.json` + the startup reconcile (embed, stdlib-JSON parse, `CLIENT_KEYS` match, hash, prune-safe skips, and a store upsert method), **and remove the `POST /admin/oidc-clients` endpoint + its route** (§5) — aithne repo.
 2. **Reframe** lucas42/lucos_locations#94 (register the owntracks client) onto the new mechanism.
 3. **(Only if lucas42 opts in)** a separate decision for grants-source-control, which would supersede lucas42/lucos_locations#95.
+
+## Amendment — 2026-07-07: environment-scoped `redirect_uri` filtering
+
+Raised by lucos-security ([lucos_aithne#291](https://github.com/lucas42/lucos_aithne/issues/291)) once the first real manifest entry landed ([lucos_aithne#290](https://github.com/lucas42/lucos_aithne/pull/290)): §1 deliberately keeps **one** committed manifest for every environment — there is no dev/prod manifest split — so a client entry legitimately lists both a production redirect_uri and a dev loopback callback (e.g. `http://localhost:8028/oauth2/callback`) side by side. §2's reconcile originally upserted `redirect_uris` verbatim, which meant production would register the loopback redirect_uri too, the moment lucas42 created the production linked credential for that client.
+
+Severity was assessed as low — `HasRedirectURI` is an exact string match (no wildcard repointing), and `handleAuthCodeGrant` unconditionally requires the client secret, so a captured authorization code redirected to a rogue local listener isn't independently redeemable — but it's a real, avoidable widening of production's registered-client surface, and architectural rather than a one-off mistake (it recurs for every future client needing both a prod and dev redirect_uri in the manifest).
+
+**Fix:** `reconcileOIDCClients` now takes `environment` (already available in `main()`, passed the same way as to `bootstrapAdmin`) and drops any `redirect_uri` whose host is loopback (`localhost`, or an IP where `net.IP.IsLoopback()` is true) before upserting, whenever `environment != "development"`. Dropped URIs are logged, never cause the reconcile to fail — consistent with §3's log-don't-fail posture. The single-manifest design (§1) is unchanged; this only narrows what actually reaches a non-development `oidc_clients` row.
