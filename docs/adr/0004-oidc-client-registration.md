@@ -49,9 +49,11 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - lucas42 creates one linked credential in creds per client: `clientsystem/env => lucos_aithne/env`. creds **generates** the shared random secret and delivers it to both sides — the RP reads `KEY_lucos_aithne`, aithne reads `CLIENT_KEYS`. The only residual manual step is that one-line `=>` link — the familiar estate M2M-credential operation, not a bespoke OIDC `POST`.
 - **Rotation:** changing the linked credential rotates the secret → both `CLIENT_KEYS` (aithne) and `KEY_lucos_aithne` (RP) change → a **coordinated aithne + RP redeploy** converges them (the standard creds rotation pattern). Honest note: there is a 401/403 **convergence window** between the two redeploys (one side presenting/holding the old secret while the other has rotated) — the same window as any linked-credential rotation, not specific to this design.
 
-### 5. Fate of `POST /admin/oidc-clients`
+### 5. `POST /admin/oidc-clients` is removed
 
-- Recommendation: **keep it** as an `aithne:admin`-gated **break-glass / development** tool, but make the manifest the **authoritative production source**. Document clearly that a client created via the manual `POST` in production is **non-reproducible** — a volume loss will not self-heal it and it sits outside PR review. (Alternative: remove the endpoint entirely. lucas42 to settle at review.)
+- The manual `POST /admin/oidc-clients` endpoint is **removed entirely.** The startup reconcile from the manifest becomes the **sole** OIDC-client registration path.
+- Rationale (lucas42, PR review): the estate already has a break-glass admin workflow via `BOOTSTRAP_ADMIN_CONTACT_ID`; a second `aithne:admin`-gated admin write-surface adds no value over it and is unnecessary attack surface on the auth service.
+- Scope note: only the HTTP admin **endpoint and its route** are removed. The underlying store capability to write a client row remains — the reconcile upsert is built on it.
 
 ## Consequences
 
@@ -60,6 +62,7 @@ lucas42 has chosen **option B** (see Decision §4 / Alternatives): lucos_creds g
 - **Zero manual secret handling.** The secret is *generated in* creds; nothing needs creds-write — strictly better than "pushed to creds".
 - **No new trust edge.** aithne stays read-only against creds (option B); the estate's auth SPOF gains no automated prod-creds-write.
 - Reuses two proven in-house patterns (`//go:embed` + parse; reconcile-from-config) — idiomatic and low-risk.
+- **Removes a privileged admin write-surface.** With `POST /admin/oidc-clients` gone (§5), client registration has exactly one path, and the auth service carries one fewer `aithne:admin`-gated mutation endpoint.
 - Unblocks lucas42/lucos_worlds#2 (register the lucos_worlds client with no manual secret handling) and reframes lucas42/lucos_locations#94.
 
 ### Negative / trade-offs
@@ -81,6 +84,6 @@ Extending the same reconcile-from-source pattern to **grants** (`bootstrapAdmin`
 
 ## Deferred work (to be ticketed on acceptance)
 
-1. **Implement** `oidc_clients.json` + the startup reconcile (embed, stdlib-JSON parse, `CLIENT_KEYS` match, hash, prune-safe skips, and a store upsert method) — aithne repo.
+1. **Implement** `oidc_clients.json` + the startup reconcile (embed, stdlib-JSON parse, `CLIENT_KEYS` match, hash, prune-safe skips, and a store upsert method), **and remove the `POST /admin/oidc-clients` endpoint + its route** (§5) — aithne repo.
 2. **Reframe** lucas42/lucos_locations#94 (register the owntracks client) onto the new mechanism.
 3. **(Only if lucas42 opts in)** a separate decision for grants-source-control, which would supersede lucas42/lucos_locations#95.
