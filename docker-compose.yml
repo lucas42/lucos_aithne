@@ -22,6 +22,7 @@ services:
       - KEY_LUCOS_CONTACTS
       - SIGNING_KEK
       - BOOTSTRAP_ADMIN_CONTACT_ID
+      - CLIENT_KEYS
     volumes:
       - credential_store:/data
     healthcheck:

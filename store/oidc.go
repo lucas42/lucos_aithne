@@ -91,6 +91,34 @@ func (s *Store) CreateOIDCClient(clientID, secretHash, clientName string, redire
 	}, nil
 }
 
+// UpsertOIDCClient inserts a new OIDC client, or updates the secret_hash,
+// redirect_uris and client_name of an existing one keyed by clientID.
+// created_at is left untouched on update.
+//
+// This backs the startup manifest reconcile (ADR-0004) and is idempotent —
+// reconciling the same manifest + CLIENT_KEYS twice produces the same row.
+// Unlike CreateOIDCClient, a pre-existing clientID is not an error.
+func (s *Store) UpsertOIDCClient(clientID, secretHash, clientName string, redirectURIs []string) (*OIDCClient, error) {
+	redirectJSON, err := json.Marshal(redirectURIs)
+	if err != nil {
+		return nil, fmt.Errorf("store: marshal redirect_uris: %w", err)
+	}
+	now := time.Now().UTC()
+	_, err = s.db.Exec(
+		`INSERT INTO oidc_clients (id, secret_hash, redirect_uris, client_name, created_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   secret_hash = excluded.secret_hash,
+		   redirect_uris = excluded.redirect_uris,
+		   client_name = excluded.client_name`,
+		clientID, secretHash, string(redirectJSON), clientName, now.Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: upsert oidc client: %w", err)
+	}
+	return s.GetOIDCClient(clientID)
+}
+
 // GetOIDCClient returns the OIDC client with the given ID.
 // Returns ErrNotFound if no such client exists.
 func (s *Store) GetOIDCClient(clientID string) (*OIDCClient, error) {

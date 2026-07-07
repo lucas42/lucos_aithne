@@ -49,6 +49,15 @@ const (
 //go:embed scopes.yaml
 var scopesYAML []byte
 
+// oidc_clients.json is a committed manifest of OIDC relying parties, embedded at
+// build time (ADR-0004). Unlike scopes.yaml it is aithne's own data and is
+// committed directly — no build-time fetch step. Contains no secrets: client
+// secrets are delivered separately via the CLIENT_KEYS env var and matched by
+// client_id (see reconcileOIDCClients).
+//
+//go:embed oidc_clients.json
+var oidcClientsJSON []byte
+
 // staticFS embeds the static/ directory so the HTML login page
 // is served by the single binary (required for the scratch runtime image).
 //
@@ -285,6 +294,97 @@ func bootstrapAdmin(s *store.Store, contactID, environment string, vocab *store.
 		return
 	}
 	log.Printf("bootstrap: granted aithne:admin to contact %q in %s", contactID, environment)
+}
+
+// oidcClientManifestEntry is one entry in the committed oidc_clients.json
+// manifest. No secrets — the secret for each declared client is delivered
+// separately via CLIENT_KEYS and matched by ClientID (ADR-0004 §1/§4).
+type oidcClientManifestEntry struct {
+	ClientID     string   `json:"client_id"`
+	ClientName   string   `json:"client_name"`
+	RedirectURIs []string `json:"redirect_uris"`
+}
+
+// parseOIDCClientManifest parses the embedded oidc_clients.json manifest.
+func parseOIDCClientManifest(data []byte) ([]oidcClientManifestEntry, error) {
+	var entries []oidcClientManifestEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parse oidc_clients.json: %w", err)
+	}
+	return entries, nil
+}
+
+// parseClientKeysBySystem parses the CLIENT_KEYS env var — lucos_creds'
+// linked-credential serialisation, "clientsystem:clientenv=secret[|scope];..."
+// (see lucos_media_metadata_api's authentication.go parseClientKeys for the
+// reference parser of this same format) — into a map keyed by clientsystem.
+//
+// Per ADR-0004 §2, OIDC client reconcile matches by clientsystem == client_id
+// only; clientenvironment and scope (if present) are not used here. A
+// malformed entry is logged and skipped rather than aborting the whole parse.
+func parseClientKeysBySystem(raw string) map[string]string {
+	secrets := make(map[string]string)
+	for _, rawEntry := range strings.Split(raw, ";") {
+		rawEntry = strings.TrimSpace(rawEntry)
+		if rawEntry == "" {
+			continue
+		}
+		parts := strings.SplitN(rawEntry, "=", 2)
+		if len(parts) != 2 {
+			log.Printf("CLIENT_KEYS: malformed entry (missing '=') — skipping")
+			continue
+		}
+		clientInfo := strings.SplitN(parts[0], ":", 2)
+		if len(clientInfo) != 2 {
+			log.Printf("CLIENT_KEYS: malformed entry (missing clientsystem:clientenv) — skipping")
+			continue
+		}
+		clientSystem := strings.TrimSpace(clientInfo[0])
+		secret := strings.TrimSpace(strings.SplitN(parts[1], "|", 2)[0])
+		if clientSystem == "" || secret == "" {
+			log.Printf("CLIENT_KEYS: malformed entry (empty clientsystem or secret) — skipping")
+			continue
+		}
+		secrets[clientSystem] = secret
+	}
+	return secrets
+}
+
+// reconcileOIDCClients upserts the OIDC clients declared in the committed
+// manifest, matching each against a secret in CLIENT_KEYS (ADR-0004). It is
+// called at startup, alongside bootstrapAdmin.
+//
+// Skip-never-wipe (ADR-0004 §3): this never deletes rows. An empty or
+// unparseable manifest skips the whole reconcile, leaving the table untouched
+// (the lucos_creds#333 empty-source lesson — a delete-on-absence loop would
+// otherwise wipe every client if the manifest or CLIENT_KEYS is briefly
+// missing at startup). A declared client with no matching CLIENT_KEYS secret
+// is skipped and logged rather than half-registered.
+func reconcileOIDCClients(s *store.Store, manifestJSON []byte, clientKeysRaw string) {
+	entries, err := parseOIDCClientManifest(manifestJSON)
+	if err != nil {
+		log.Printf("oidc client reconcile: %v — skipping reconcile", err)
+		return
+	}
+	if len(entries) == 0 {
+		log.Printf("oidc client reconcile: manifest declares no clients — skipping reconcile")
+		return
+	}
+
+	secrets := parseClientKeysBySystem(clientKeysRaw)
+	for _, entry := range entries {
+		secret, ok := secrets[entry.ClientID]
+		if !ok {
+			log.Printf("oidc client reconcile: no CLIENT_KEYS secret for declared client %q — skipping", entry.ClientID)
+			continue
+		}
+		secretHash := hashOIDCSecret(secret)
+		if _, err := s.UpsertOIDCClient(entry.ClientID, secretHash, entry.ClientName, entry.RedirectURIs); err != nil {
+			log.Printf("oidc client reconcile: upsert %q: %v", entry.ClientID, err)
+			continue
+		}
+		log.Printf("oidc client reconcile: upserted client %q", entry.ClientID)
+	}
 }
 
 // bootstrapInvite creates a single-use enrolment invite for the bootstrap
@@ -1479,6 +1579,10 @@ func main() {
 		bootstrapAdmin(s, adminContactID, environment, vocab)
 	}
 
+	// Reconcile OIDC clients from the committed oidc_clients.json manifest
+	// (ADR-0004). Upsert-only — see reconcileOIDCClients doc comment.
+	reconcileOIDCClients(s, oidcClientsJSON, os.Getenv("CLIENT_KEYS"))
+
 	// Initialise the lucos_contacts client for contact verification and name lookup.
 	contactsOrigin := getEnvRequired("LUCOS_CONTACTS_ORIGIN")
 	contactsKey := getEnvRequired("KEY_LUCOS_CONTACTS")
@@ -1580,8 +1684,8 @@ func main() {
 	mux.HandleFunc("/admin/agents", handleAgents(s, vocab, issuer, environment))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, issuer, handleAdminMachineKeys(s)))
 	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, issuer, handleAdminMachineKeyByID(s)))
-	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
-	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, issuer, handleAdminOIDCClients(s)))
+	// OIDC clients are no longer registered via an admin endpoint (ADR-0004 §5) —
+	// see reconcileOIDCClients, called from main() at startup.
 	mux.HandleFunc("/admin/rotate-signing-key", requireAdminScope(s, issuer, handleRotateSigningKey(s)))
 	// Revoke all active IdP sessions for a principal (credential-compromise runbook).
 	// DELETE /admin/principals/{id}/idp-sessions

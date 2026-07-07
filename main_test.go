@@ -3084,8 +3084,6 @@ func newOIDCMux(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, testIssuer, "development"))
 	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter()))
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, testIssuer, nil))
-	mux.HandleFunc("/admin/oidc-clients", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))
-	mux.HandleFunc("/admin/oidc-clients/", requireAdminScope(s, testIssuer, handleAdminOIDCClients(s)))
 	return mux
 }
 
@@ -4061,156 +4059,160 @@ func TestUserinfo_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// --- Admin OIDC client management tests ---
+// ============================================================
+// OIDC client manifest reconcile tests (ADR-0004, lucos_aithne#287)
+// ============================================================
 
-func TestAdminOIDCClients_Create(t *testing.T) {
-	s, err := store.Open(":memory:", testMainKEK)
+func TestParseOIDCClientManifest_Valid(t *testing.T) {
+	data := []byte(`[
+		{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]},
+		{"client_id": "owntracks", "client_name": "OwnTracks", "redirect_uris": ["app://owntracks/cb"]}
+	]`)
+	entries, err := parseOIDCClientManifest(data)
 	if err != nil {
-		t.Fatalf("open test store: %v", err)
+		t.Fatalf("parseOIDCClientManifest: %v", err)
 	}
-	defer s.Close()
-	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
-		t.Fatalf("signing key: %v", err)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
-
-	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
-	body := bytes.NewBufferString(`{"client_id":"my-rp","redirect_uris":["https://rp.test/cb"],"client_name":"My RP"}`)
-	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	rr := httptest.NewRecorder()
-	newOIDCMux(s).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d — body: %s", rr.Code, rr.Body.String())
-	}
-	var resp createOIDCClientResponse
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.ClientID != "my-rp" {
-		t.Errorf("client_id: got %q, want %q", resp.ClientID, "my-rp")
-	}
-	if resp.ClientSecret == "" {
-		t.Error("client_secret must not be empty")
-	}
-	if resp.Note == "" {
-		t.Error("note must not be empty (secret is shown only once)")
+	if entries[0].ClientID != "lucos_worlds" || entries[0].ClientName != "Worlds" {
+		t.Errorf("entry 0: got %+v", entries[0])
 	}
 }
 
-func TestAdminOIDCClients_List(t *testing.T) {
-	s, err := store.Open(":memory:", testMainKEK)
+func TestParseOIDCClientManifest_Empty(t *testing.T) {
+	entries, err := parseOIDCClientManifest([]byte(`[]`))
 	if err != nil {
-		t.Fatalf("open test store: %v", err)
+		t.Fatalf("parseOIDCClientManifest: %v", err)
 	}
-	defer s.Close()
-	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
-		t.Fatalf("signing key: %v", err)
-	}
-
-	createTestOIDCClient(t, s, "rp1", []string{"https://rp1.test/cb"})
-	createTestOIDCClient(t, s, "rp2", []string{"https://rp2.test/cb"})
-
-	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
-	req := httptest.NewRequest(http.MethodGet, "/admin/oidc-clients", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	rr := httptest.NewRecorder()
-	newOIDCMux(s).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	var clients []oidcClientJSON
-	if err := json.NewDecoder(rr.Body).Decode(&clients); err != nil {
-		t.Fatalf("decode clients: %v", err)
-	}
-	if len(clients) != 2 {
-		t.Errorf("expected 2 clients, got %d", len(clients))
-	}
-	// Secret hash must NOT appear in the list response.
-	raw := rr.Body.String()
-	_ = raw // rr.Body has been consumed; check via decoded struct
-	for _, c := range clients {
-		if c.ClientID == "" {
-			t.Error("client_id must not be empty in list")
-		}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
 }
 
-func TestAdminOIDCClients_Delete(t *testing.T) {
-	s, err := store.Open(":memory:", testMainKEK)
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	defer s.Close()
-	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
-		t.Fatalf("signing key: %v", err)
-	}
-
-	createTestOIDCClient(t, s, "rp-to-delete", []string{"https://rp.test/cb"})
-
-	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
-	req := httptest.NewRequest(http.MethodDelete, "/admin/oidc-clients/rp-to-delete", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	rr := httptest.NewRecorder()
-	newOIDCMux(s).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d — body: %s", rr.Code, rr.Body.String())
-	}
-
-	// Confirm deleted.
-	if _, err := s.GetOIDCClient("rp-to-delete"); err != store.ErrNotFound {
-		t.Errorf("expected ErrNotFound after delete, got %v", err)
+func TestParseOIDCClientManifest_Unparseable(t *testing.T) {
+	if _, err := parseOIDCClientManifest([]byte(`not json`)); err == nil {
+		t.Error("expected an error for unparseable manifest, got nil")
 	}
 }
 
-func TestAdminOIDCClients_RequiresAdminScope(t *testing.T) {
-	s, err := store.Open(":memory:", testMainKEK)
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
+func TestParseClientKeysBySystem(t *testing.T) {
+	raw := "lucos_worlds:development=secret1;owntracks:production=secret2|some-scope"
+	secrets := parseClientKeysBySystem(raw)
+	if secrets["lucos_worlds"] != "secret1" {
+		t.Errorf("lucos_worlds: got %q, want %q", secrets["lucos_worlds"], "secret1")
 	}
-	defer s.Close()
-	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
-		t.Fatalf("signing key: %v", err)
-	}
-
-	noAdminToken := mintBearerToken(t, s, []string{"render-ui"})
-	body := bytes.NewBufferString(`{"client_id":"bad-rp","redirect_uris":["https://rp.test/cb"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+noAdminToken)
-	rr := httptest.NewRecorder()
-	newOIDCMux(s).ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
+	// Scope suffix must be stripped from the secret.
+	if secrets["owntracks"] != "secret2" {
+		t.Errorf("owntracks: got %q, want %q", secrets["owntracks"], "secret2")
 	}
 }
 
-func TestAdminOIDCClients_DuplicateClientID(t *testing.T) {
+func TestParseClientKeysBySystem_Empty(t *testing.T) {
+	secrets := parseClientKeysBySystem("")
+	if len(secrets) != 0 {
+		t.Errorf("expected no secrets from empty CLIENT_KEYS, got %v", secrets)
+	}
+}
+
+func TestParseClientKeysBySystem_MalformedEntrySkipped(t *testing.T) {
+	// "garbage" (no '=') and "no-colon=secret" (no clientsystem:clientenv) are both
+	// malformed and should be skipped without affecting the well-formed entry.
+	raw := "garbage;no-colon=secret;lucos_worlds:development=goodsecret"
+	secrets := parseClientKeysBySystem(raw)
+	if len(secrets) != 1 || secrets["lucos_worlds"] != "goodsecret" {
+		t.Errorf("expected only lucos_worlds=goodsecret to survive, got %v", secrets)
+	}
+}
+
+func TestReconcileOIDCClients_UpsertsMatchedClient(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
 	defer s.Close()
-	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
-		t.Fatalf("signing key: %v", err)
-	}
 
+	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=the-secret")
+
+	client, err := s.GetOIDCClient("lucos_worlds")
+	if err != nil {
+		t.Fatalf("expected client to be upserted, got: %v", err)
+	}
+	if client.SecretHash != hashOIDCSecret("the-secret") {
+		t.Errorf("secret_hash: got %q, want hash of %q", client.SecretHash, "the-secret")
+	}
+	if client.ClientName != "Worlds" {
+		t.Errorf("client_name: got %q, want %q", client.ClientName, "Worlds")
+	}
+}
+
+func TestReconcileOIDCClients_SkipsDeclaredClientWithNoSecret(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
+	reconcileOIDCClients(s, manifest, "") // no CLIENT_KEYS secret for lucos_worlds
+
+	if _, err := s.GetOIDCClient("lucos_worlds"); err != store.ErrNotFound {
+		t.Errorf("expected ErrNotFound (client skipped, not half-registered), got %v", err)
+	}
+}
+
+func TestReconcileOIDCClients_EmptyManifestSkipsReconcile(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
 	createTestOIDCClient(t, s, "existing-rp", []string{"https://rp.test/cb"})
 
-	adminToken := mintBearerToken(t, s, []string{"aithne:admin"})
-	body := bytes.NewBufferString(`{"client_id":"existing-rp","redirect_uris":["https://rp.test/cb2"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/admin/oidc-clients", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	rr := httptest.NewRecorder()
-	newOIDCMux(s).ServeHTTP(rr, req)
+	reconcileOIDCClients(s, []byte(`[]`), "lucos_worlds:development=secret")
 
-	if rr.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d — body: %s", rr.Code, rr.Body.String())
+	// Pre-existing rows must be untouched — an empty manifest never wipes the table.
+	if _, err := s.GetOIDCClient("existing-rp"); err != nil {
+		t.Errorf("expected existing-rp to survive an empty-manifest reconcile, got: %v", err)
+	}
+}
+
+func TestReconcileOIDCClients_UnparseableManifestSkipsReconcile(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	createTestOIDCClient(t, s, "existing-rp", []string{"https://rp.test/cb"})
+
+	reconcileOIDCClients(s, []byte(`not json`), "lucos_worlds:development=secret")
+
+	if _, err := s.GetOIDCClient("existing-rp"); err != nil {
+		t.Errorf("expected existing-rp to survive an unparseable-manifest reconcile, got: %v", err)
+	}
+}
+
+func TestReconcileOIDCClients_IdempotentOnRerun(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	manifest := []byte(`[{"client_id": "lucos_worlds", "client_name": "Worlds", "redirect_uris": ["https://worlds.l42.eu/cb"]}]`)
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v1")
+	reconcileOIDCClients(s, manifest, "lucos_worlds:development=secret-v2") // simulates a rotated secret
+
+	clients, err := s.ListOIDCClients()
+	if err != nil {
+		t.Fatalf("ListOIDCClients: %v", err)
+	}
+	if len(clients) != 1 {
+		t.Fatalf("expected exactly 1 client after two reconciles of the same client_id, got %d", len(clients))
+	}
+	if clients[0].SecretHash != hashOIDCSecret("secret-v2") {
+		t.Errorf("expected secret_hash to reflect the latest reconcile, got %q", clients[0].SecretHash)
 	}
 }
 
