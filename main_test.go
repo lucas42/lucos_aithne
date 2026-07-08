@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3636,15 +3635,21 @@ func TestOAuth2Token_AuthCodeGrant_BasicAuthBothMethodsRejected(t *testing.T) {
 	}
 }
 
-// TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding verifies that client
-// credentials sent via HTTP Basic Auth are URL-decoded per RFC 6749 §2.3.1
-// (the client_id/client_secret are each application/x-www-form-urlencoded
-// before being combined and base64-encoded) — Go's r.BasicAuth() only
-// reverses the base64 step, not the URL-encoding (lucos-architect review,
-// lucas42/lucos_aithne#295). Uses a client_id/secret containing characters
-// that require encoding ("+", " ", "/") so the test would fail if decoding
-// were skipped, not just pass trivially on plain alphanumerics.
-func TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding(t *testing.T) {
+// TestOAuth2Token_AuthCodeGrant_BasicAuthRawCredentials verifies that client
+// credentials sent via HTTP Basic Auth are used RAW (base64-decoded only,
+// NOT additionally URL-decoded), because that's what real clients actually
+// send: RFC 6749 §2.3.1 technically wants each component
+// application/x-www-form-urlencoded before combining and base64-encoding,
+// but league/oauth2-client's HttpBasicAuthOptionProvider — which BookStack
+// (lucos_worlds) hardcodes — does `base64_encode(sprintf('%s:%s', id,
+// secret))` with no urlencode step, despite its own docblock citing this RFC
+// section (verified directly against the vendored library). #296 merged and
+// deployed with a url.QueryUnescape() call added on an earlier review
+// suggestion; lucos-architect caught afterwards that it would have silently
+// mangled a real client_secret containing '+' (decoded to space) or '%' (a
+// decode error). This test uses such a secret specifically so it would fail
+// if URL-decoding were ever reintroduced.
+func TestOAuth2Token_AuthCodeGrant_BasicAuthRawCredentials(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
@@ -3655,8 +3660,8 @@ func TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding(t *testing.T) {
 	}
 
 	mux := newOIDCMux(s)
-	rawClientID := "rp client+id"
-	rawSecret := "secret+with/chars"
+	rawClientID := "rp-basicauth-raw"
+	rawSecret := "secret+with%chars" // '+' and '%' would be mangled by URL-decoding
 	secretHash := hashOIDCSecret(rawSecret)
 	if _, err := s.CreateOIDCClient(rawClientID, secretHash, "Test Client", []string{"https://rp.test/cb"}); err != nil {
 		t.Fatalf("create client: %v", err)
@@ -3667,11 +3672,10 @@ func TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding(t *testing.T) {
 		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
 	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Build the Authorization header manually with URL-encoded components —
-	// req.SetBasicAuth doesn't URL-encode its inputs, so a real spec-compliant
-	// client would encode before calling the equivalent of SetBasicAuth.
-	encoded := url.QueryEscape(rawClientID) + ":" + url.QueryEscape(rawSecret)
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(encoded)))
+	// Mirrors league/oauth2-client's actual encoding: raw "id:secret", no
+	// urlencode step — req.SetBasicAuth does exactly this (base64 only), so
+	// it's the right stand-in for BookStack's real behaviour here.
+	req.SetBasicAuth(rawClientID, rawSecret)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 
