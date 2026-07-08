@@ -87,7 +87,7 @@ func writeTokenError(w http.ResponseWriter, status int, errCode, description str
 // It dispatches between the supported grant types:
 //   - client_credentials (RFC 6749 §4.4): agent/machine principals via machine_key
 //   - authorization_code (RFC 6749 §4.1): human principals via OIDC authorization flow
-func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter) http.HandlerFunc {
+func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter, contacts *contactsClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
@@ -104,7 +104,7 @@ func handleOAuth2Token(s *store.Store, issuer, environment string, tokenLimiter 
 		case "client_credentials":
 			handleClientCredentialsGrant(s, issuer, environment, tokenLimiter, w, r)
 		case "authorization_code":
-			handleAuthCodeGrant(s, issuer, environment, tokenLimiter, w, r)
+			handleAuthCodeGrant(s, issuer, environment, tokenLimiter, contacts, w, r)
 		default:
 			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type",
 				fmt.Sprintf("unsupported grant_type %q; supported: client_credentials, authorization_code", grantType))

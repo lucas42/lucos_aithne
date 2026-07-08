@@ -52,6 +52,18 @@ const ClaimPrincipalClass = "principal_class"
 // ClaimScopes is the custom JWT claim name for the granted scope list.
 const ClaimScopes = "scopes"
 
+// ClaimOIDCScopes is the custom JWT claim name for the subset of OIDC-protocol
+// scopes (openid/profile/email) the client requested at /oauth2/authorize.
+//
+// Deliberately separate from ClaimScopes: ClaimScopes carries only aithne
+// authorisation scopes (requested ∩ granted, per lucos_aithne#277) and
+// OIDC-protocol scopes must never leak into it — several tests assert this
+// exactly (TestOAuth2Token_AuthCodeGrant_ScopeNarrowing et al). This claim
+// exists purely so handleUserinfo can gate scope-conditional claims like
+// "email" (lucos_aithne#299) on what was actually requested, since userinfo
+// only ever sees the access token, not the original /authorize request.
+const ClaimOIDCScopes = "oidc_scopes"
+
 // SessionClaims holds the decoded fields from a validated session JWT.
 type SessionClaims struct {
 	// Subject is the external identity: lucos_contacts contact-id (human) or
@@ -63,6 +75,13 @@ type SessionClaims struct {
 
 	// Scopes are the granted capabilities stamped into this session at mint time.
 	Scopes []string
+
+	// OIDCScopes are the OIDC-protocol scopes (subset of openid/profile/email)
+	// requested at /oauth2/authorize for this session, if minted via the
+	// authorization_code grant. Empty for sessions minted by other flows
+	// (client_credentials, WebAuthn login, remint) which have no OIDC request
+	// to draw this from.
+	OIDCScopes []string
 
 	// IssuedAt and ExpiresAt are the standard JWT validity window.
 	IssuedAt  time.Time
@@ -78,6 +97,11 @@ type SessionClaims struct {
 // issuer should be the full HTTPS URL of the aithne service (APP_ORIGIN).
 // audience identifies the intended token consumers; use "l42.eu" for estate-wide tokens.
 // ttl overrides the default TTL; pass 0 to use DefaultSessionTTL.
+// oidcScopes is optional (variadic so existing callers are unaffected): the
+// OIDC-protocol scopes requested at /oauth2/authorize, embedded under
+// ClaimOIDCScopes for handleUserinfo to gate scope-conditional claims on
+// (lucos_aithne#299). Omit entirely for sessions minted outside the
+// authorization_code grant.
 func MintSession(
 	p *store.Principal,
 	scopes []string,
@@ -85,12 +109,16 @@ func MintSession(
 	issuer string,
 	audience string,
 	ttl time.Duration,
+	oidcScopes ...string,
 ) (string, error) {
 	if ttl <= 0 {
 		ttl = DefaultSessionTTL
 	}
 	if scopes == nil {
 		scopes = []string{}
+	}
+	if oidcScopes == nil {
+		oidcScopes = []string{}
 	}
 
 	// Load the private key from PKCS8 DER.
@@ -128,6 +156,7 @@ func MintSession(
 		JwtID(jti).
 		Claim(ClaimPrincipalClass, string(p.Class)).
 		Claim(ClaimScopes, scopes).
+		Claim(ClaimOIDCScopes, oidcScopes).
 		Build()
 	if err != nil {
 		return "", fmt.Errorf("token: build JWT: %w", err)
@@ -166,21 +195,34 @@ func ParseSession(tokenStr string, keySet jwk.Set, issuer, audience string) (*Se
 		claims.PrincipalClass = store.PrincipalClass(fmt.Sprintf("%v", pc))
 	}
 
-	if scopesRaw, ok := tok.Get(ClaimScopes); ok {
-		switch v := scopesRaw.(type) {
-		case []string:
-			claims.Scopes = v
-		case []interface{}:
-			for _, s := range v {
-				claims.Scopes = append(claims.Scopes, fmt.Sprintf("%v", s))
-			}
-		}
-	}
-	if claims.Scopes == nil {
-		claims.Scopes = []string{}
-	}
+	claims.Scopes = stringSliceClaim(tok, ClaimScopes)
+	claims.OIDCScopes = stringSliceClaim(tok, ClaimOIDCScopes)
 
 	return claims, nil
+}
+
+// stringSliceClaim reads a []string-valued custom claim from a parsed JWT.
+// JWT libraries decode JSON arrays as []interface{}, not []string, so this
+// normalises either representation; returns a non-nil empty slice if the
+// claim is absent or of an unexpected type.
+func stringSliceClaim(tok jwt.Token, claimName string) []string {
+	out := []string{}
+	raw, ok := tok.Get(claimName)
+	if !ok {
+		return out
+	}
+	switch v := raw.(type) {
+	case []string:
+		out = v
+	case []interface{}:
+		for _, s := range v {
+			out = append(out, fmt.Sprintf("%v", s))
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
 }
 
 // BuildVerificationKeySet constructs a jwk.Set from a list of signing keys for use
@@ -262,11 +304,17 @@ func JWKSHandler(getKeys func() ([]*store.SigningKey, error)) http.HandlerFunc {
 // same ClaimScopes claim so a generic OIDC RP can gate on it (lucos_aithne#277).
 // Per ADR-0001 §6, issuance is never gated on scopes: a zero-grant principal
 // still receives a valid id_token carrying an empty scopes claim.
+//
+// email is the ADR-0003 primary_email claim value, already resolved by the
+// caller (contacts lookup + "email" OIDC scope check) — pass "" to omit the
+// claim entirely (lucos_aithne#299), e.g. when the person has no primary
+// email or the client didn't request the email scope.
 func MintIDToken(
 	p *store.Principal,
 	clientID string,
 	nonce string,
 	scopes []string,
+	email string,
 	signingKey *store.SigningKey,
 	issuer string,
 	ttl time.Duration,
@@ -315,6 +363,13 @@ func MintIDToken(
 	// supplied it in the authorization request (OIDC Core §3.1.3.7).
 	if nonce != "" {
 		builder = builder.Claim("nonce", nonce)
+	}
+
+	// Omit the email claim entirely rather than embedding an empty string —
+	// absence is the documented "no primary email" / "email scope not
+	// requested" signal (lucos_aithne#299).
+	if email != "" {
+		builder = builder.Claim("email", email)
 	}
 
 	tok, err := builder.Build()

@@ -1731,7 +1731,7 @@ func main() {
 
 	// OAuth2/OIDC endpoints (ADR §1, §5).
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, issuer, environment))
-	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment, tokenLimiter))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment, tokenLimiter, contacts))
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
 	// Admin enrolment surface (all gated on aithne:admin scope).

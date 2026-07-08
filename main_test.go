@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2104,9 +2105,10 @@ func TestCeremonyStore_OneTimeUse(t *testing.T) {
 
 // newMachineAuthMux builds a test ServeMux with the oauth2/token,
 // admin/machine-keys, and admin/machine-keys/{id} endpoints registered.
+// Machine principals have no lucos_contacts profile, so contacts is nil.
 func newMachineAuthMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter()))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter(), nil))
 	mux.HandleFunc("/admin/machine-keys", requireAdminScope(s, testIssuer, handleAdminMachineKeys(s)))
 	mux.HandleFunc("/admin/machine-keys/", requireAdminScope(s, testIssuer, handleAdminMachineKeyByID(s)))
 	return mux
@@ -3075,15 +3077,24 @@ func TestAdminRotateSigningKey_OldKeyStillVerifies(t *testing.T) {
 // --- Test helpers ---
 
 // newOIDCMux builds a test ServeMux with the OIDC and related endpoints.
+// contacts is nil — see newOIDCMuxWithContacts for tests exercising
+// lucos_contacts-derived claims (name, email).
 func newOIDCMux(s *store.Store) *http.ServeMux {
+	return newOIDCMuxWithContacts(s, nil)
+}
+
+// newOIDCMuxWithContacts is newOIDCMux with a caller-supplied contactsClient,
+// for tests exercising the ADR-0003 email claim (lucos_aithne#299) or the
+// pre-existing name enrichment, both of which are no-ops when contacts is nil.
+func newOIDCMuxWithContacts(s *store.Store, contacts *contactsClient) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", handleOpenIDConfiguration(testIssuer))
 	mux.HandleFunc("/.well-known/jwks.json", token.JWKSHandler(func() ([]*store.SigningKey, error) {
 		return s.ListVerificationKeys(token.VerificationWindow)
 	}))
 	mux.HandleFunc("/oauth2/authorize", handleAuthorize(s, testIssuer, "development"))
-	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter()))
-	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, testIssuer, nil))
+	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, testIssuer, "development", noopLimiter(), contacts))
+	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, testIssuer, contacts))
 	return mux
 }
 
@@ -3942,6 +3953,81 @@ func TestOAuth2Token_AuthCodeGrant_IdTokenScopesEmptyForZeroGrantPrincipal(t *te
 	}
 }
 
+// --- id_token email claim tests (lucos_aithne#299 / ADR-0003) ---
+
+func TestOAuth2Token_AuthCodeGrant_IdTokenHasEmailClaimWhenRequested(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Dave","primary_email":"dave@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-idtoken-email", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-idtoken-email", "https://rp.test/cb", "dave", "s", "n", "openid email")
+	resp := exchangeCodeForTokens(t, mux, "rp-idtoken-email", rawSecret, "https://rp.test/cb", code)
+	idTokenStr, _ := resp["id_token"].(string)
+	if idTokenStr == "" {
+		t.Fatal("id_token must not be empty")
+	}
+
+	payload := decodeJWTPayloadForTest(t, idTokenStr)
+	if !strings.Contains(payload, `"email":"dave@example.com"`) {
+		t.Errorf("id_token payload missing email claim: %s", payload)
+	}
+}
+
+func TestOAuth2Token_AuthCodeGrant_IdTokenOmitsEmailClaimWhenScopeNotRequested(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Erin","primary_email":"erin@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-idtoken-no-email-scope", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-idtoken-no-email-scope", "https://rp.test/cb", "erin", "s", "n", "openid")
+	resp := exchangeCodeForTokens(t, mux, "rp-idtoken-no-email-scope", rawSecret, "https://rp.test/cb", code)
+	idTokenStr, _ := resp["id_token"].(string)
+	if idTokenStr == "" {
+		t.Fatal("id_token must not be empty")
+	}
+
+	payload := decodeJWTPayloadForTest(t, idTokenStr)
+	if strings.Contains(payload, `"email"`) {
+		t.Errorf("id_token must omit email claim when the email scope wasn't requested: %s", payload)
+	}
+}
+
+// decodeJWTPayloadForTest base64url-decodes a JWT's payload segment (without
+// signature verification) so tests can assert on raw claim presence/absence.
+func decodeJWTPayloadForTest(t *testing.T, tokStr string) string {
+	t.Helper()
+	parts := strings.Split(tokStr, ".")
+	if len(parts) != 3 {
+		t.Fatalf("malformed JWT: expected 3 segments, got %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode JWT payload: %v", err)
+	}
+	return string(payload)
+}
+
 func TestOAuth2Token_AuthCodeGrant_ReplayRejected(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
@@ -4207,6 +4293,137 @@ func TestUserinfo_ScopesEmptyForZeroGrantPrincipal(t *testing.T) {
 	if len(scopesRaw) != 0 {
 		t.Errorf("userinfo scopes: got %v, want empty array", scopesRaw)
 	}
+}
+
+// --- Userinfo email claim tests (lucos_aithne#299 / ADR-0003) ---
+//
+// These drive the real authorization_code flow (issueAuthCodeWithScope +
+// POST /oauth2/token) rather than mintBearerToken directly, because the
+// "email" OIDC scope signal (ClaimOIDCScopes) is only ever stamped by
+// handleAuthCodeGrant — mintBearerToken calls token.MintSession directly and
+// so never carries it.
+
+func TestUserinfo_EmailClaim_PresentWhenScopeRequestedAndPrimaryEmailSet(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Alice","primary_email":"alice@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-email-present", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-email-present", "https://rp.test/cb", "alice", "s", "n", "openid email")
+	accessToken := exchangeCodeForTokens(t, mux, "rp-email-present", rawSecret, "https://rp.test/cb", code)["access_token"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if resp["email"] != "alice@example.com" {
+		t.Errorf("userinfo email: got %v, want alice@example.com", resp["email"])
+	}
+}
+
+func TestUserinfo_EmailClaim_AbsentWhenScopeNotRequested(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// Contacts has a primary email on file, but the client never requested
+	// the "email" scope — it must not be leaked.
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Bob","primary_email":"bob@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-email-not-requested", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-email-not-requested", "https://rp.test/cb", "bob", "s", "n", "openid")
+	accessToken := exchangeCodeForTokens(t, mux, "rp-email-not-requested", rawSecret, "https://rp.test/cb", code)["access_token"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if _, present := resp["email"]; present {
+		t.Errorf("userinfo must omit email when the email scope wasn't requested, got %v", resp["email"])
+	}
+}
+
+func TestUserinfo_EmailClaim_AbsentWhenNoPrimaryEmail(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// primary_email absent from the contacts response entirely.
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Carol"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-no-primary-email", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-no-primary-email", "https://rp.test/cb", "carol", "s", "n", "openid email")
+	accessToken := exchangeCodeForTokens(t, mux, "rp-no-primary-email", rawSecret, "https://rp.test/cb", code)["access_token"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if _, present := resp["email"]; present {
+		t.Errorf("userinfo must omit email when the person has no primary email, got %v", resp["email"])
+	}
+}
+
+// exchangeCodeForTokens POSTs to /oauth2/token with the authorization_code
+// grant and returns the decoded JSON response (access_token, id_token, etc).
+func exchangeCodeForTokens(t *testing.T, mux *http.ServeMux, clientID, clientSecret, redirectURI, code string) map[string]any {
+	t.Helper()
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=" + url.QueryEscape(clientID) + "&client_secret=" + url.QueryEscape(clientSecret) +
+		"&redirect_uri=" + url.QueryEscape(redirectURI))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("exchangeCodeForTokens: expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("exchangeCodeForTokens: decode response: %v", err)
+	}
+	return resp
 }
 
 func TestUserinfo_MissingToken_401(t *testing.T) {

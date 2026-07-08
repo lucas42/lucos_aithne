@@ -84,7 +84,7 @@ func handleOpenIDConfiguration(issuer string) http.HandlerFunc {
 		SubjectTypesSupported:             []string{"public"},
 		IDTokenSigningAlgValuesSupported:  []string{"ES256"},
 		TokenEndpointAuthMethodsSupported: []string{"client_secret_post", "client_secret_basic"},
-		ClaimsSupported:                   []string{"iss", "sub", "aud", "exp", "iat", "jti", "nonce", "principal_class", "name", "scopes"},
+		ClaimsSupported:                   []string{"iss", "sub", "aud", "exp", "iat", "jti", "nonce", "principal_class", "name", "email", "scopes"},
 	}
 	b, _ := json.Marshal(doc) // static; marshal once at construction
 
@@ -244,7 +244,7 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 
 // handleAuthCodeGrant implements the authorization_code grant for handleOAuth2Token.
 // It is called after the grant_type has been confirmed to be "authorization_code".
-func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter, w http.ResponseWriter, r *http.Request) {
+func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimiter *keyedLimiter, contacts *contactsClient, w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	clientID := r.FormValue("client_id")
 	clientSecret := r.FormValue("client_secret")
@@ -410,6 +410,36 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 		}
 	}
 
+	// Separately track which *OIDC-protocol* scopes (openid/profile/email)
+	// were requested, restricted to the advertised set — this is deliberately
+	// NOT folded into effectiveScopes/ClaimScopes above (several tests assert
+	// OIDC scopes never appear there). It exists purely to gate scope-
+	// conditional claims like "email" (lucos_aithne#299): embedded on the
+	// access token via ClaimOIDCScopes for handleUserinfo, and resolved here
+	// directly for the id_token.
+	oidcScopeSet := toSet(oidcScopes)
+	requestedOIDCScopes := make([]string, 0, len(requestedScopes))
+	for _, sc := range requestedScopes {
+		if oidcScopeSet[sc] {
+			requestedOIDCScopes = append(requestedOIDCScopes, sc)
+		}
+	}
+
+	// Resolve the primary_email claim value (ADR-0003 / lucos_aithne#299):
+	// only for human principals who requested the "email" scope, and only if
+	// lucos_contacts actually has a primary email on file. Best-effort, like
+	// the equivalent lookup in handleUserinfo — a contacts outage must not
+	// fail the token exchange, it just omits the claim.
+	var email string
+	if principal.Class == store.PrincipalClassHuman && contacts != nil && slices.Contains(requestedOIDCScopes, "email") {
+		info, err := contacts.Get(principal.ExternalID)
+		if err == nil {
+			email = info.PrimaryEmail
+		} else if !errors.Is(err, store.ErrNotFound) {
+			reqLogger(r).Printf("handleAuthCodeGrant: contacts lookup for %q: %v", principal.ExternalID, err)
+		}
+	}
+
 	signingKey, err := s.GetOrCreateActiveSigningKey()
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: get signing key: %v", err)
@@ -418,8 +448,9 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	}
 
 	// Mint the access token — same session JWT format as all other flows
-	// (audience "l42.eu"), carrying only the effective (narrowed) scope set.
-	accessToken, err := token.MintSession(principal, effectiveScopes, signingKey, issuer, "l42.eu", 0)
+	// (audience "l42.eu"), carrying the effective (narrowed) scope set plus
+	// the requested OIDC scopes (for handleUserinfo's claim gating).
+	accessToken, err := token.MintSession(principal, effectiveScopes, signingKey, issuer, "l42.eu", 0, requestedOIDCScopes...)
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: mint access token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
@@ -429,8 +460,9 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	// Mint the OIDC ID token — audience is the client_id, nonce forwarded.
 	// Carries the same effective (narrowed) scope set as the access token, so a
 	// generic OIDC RP (which authenticates off the id_token, not the access
-	// token) has something to gate on (lucos_aithne#277).
-	idToken, err := token.MintIDToken(principal, clientID, authCode.Nonce, effectiveScopes, signingKey, issuer, 0)
+	// token) has something to gate on (lucos_aithne#277), plus the
+	// already-resolved, already scope-gated email claim (lucos_aithne#299).
+	idToken, err := token.MintIDToken(principal, clientID, authCode.Nonce, effectiveScopes, email, signingKey, issuer, 0)
 	if err != nil {
 		reqLogger(r).Printf("handleAuthCodeGrant: mint id_token: %v", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "internal error")
@@ -501,9 +533,19 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 		// Attempt to enrich with profile data from lucos_contacts for human principals.
 		if claims.PrincipalClass == store.PrincipalClassHuman && contacts != nil {
 			info, err := contacts.Get(claims.Subject)
-			if err == nil && info.DisplayName != "" {
-				resp["name"] = info.DisplayName
-			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			if err == nil {
+				if info.DisplayName != "" {
+					resp["name"] = info.DisplayName
+				}
+				// email is gated on the "email" OIDC scope having been
+				// requested at /oauth2/authorize (ClaimOIDCScopes, stamped
+				// onto the access token by handleAuthCodeGrant) — omit
+				// entirely rather than emitting an empty claim if the person
+				// has no primary email set (lucos_aithne#299, ADR-0003).
+				if slices.Contains(claims.OIDCScopes, "email") && info.PrimaryEmail != "" {
+					resp["email"] = info.PrimaryEmail
+				}
+			} else if !errors.Is(err, store.ErrNotFound) {
 				// Log but don't fail — contacts lookup is best-effort.
 				reqLogger(r).Printf("handleUserinfo: contacts lookup for %q: %v", claims.Subject, err)
 			}
