@@ -1,6 +1,7 @@
 package token_test
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,6 +178,106 @@ func TestParseSession_RoundTrip_Agent(t *testing.T) {
 	if claims.PrincipalClass != store.PrincipalClassAgent {
 		t.Errorf("PrincipalClass: got %q, want agent", claims.PrincipalClass)
 	}
+}
+
+// --- OIDC scopes claim (lucos_aithne#299) ---
+
+func TestParseSession_RoundTrip_OIDCScopes(t *testing.T) {
+	k, s := newTestSigningKey(t)
+	p := newTestPrincipal(t, s, store.PrincipalClassHuman, "contact-oidc-scopes")
+
+	tokStr, err := token.MintSession(p, []string{"contacts:read"}, k, testIssuer, testAudience, 0, "openid", "email")
+	if err != nil {
+		t.Fatalf("MintSession: %v", err)
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(tokStr, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+
+	if len(claims.OIDCScopes) != 2 || claims.OIDCScopes[0] != "openid" || claims.OIDCScopes[1] != "email" {
+		t.Errorf("OIDCScopes: got %v, want [openid email]", claims.OIDCScopes)
+	}
+	// The aithne authorisation scopes claim must stay untouched by the
+	// variadic oidcScopes addition.
+	if len(claims.Scopes) != 1 || claims.Scopes[0] != "contacts:read" {
+		t.Errorf("Scopes: got %v, want [contacts:read]", claims.Scopes)
+	}
+}
+
+func TestParseSession_OIDCScopesEmptyWhenOmitted(t *testing.T) {
+	k, s := newTestSigningKey(t)
+	p := newTestPrincipal(t, s, store.PrincipalClassHuman, "contact-no-oidc-scopes")
+
+	// No trailing oidcScopes args — matches every pre-existing MintSession call site.
+	tokStr, err := token.MintSession(p, []string{"contacts:read"}, k, testIssuer, testAudience, 0)
+	if err != nil {
+		t.Fatalf("MintSession: %v", err)
+	}
+
+	keys, _ := s.ListVerificationKeys(token.VerificationWindow)
+	keySet, _ := token.BuildVerificationKeySet(keys)
+	claims, err := token.ParseSession(tokStr, keySet, testIssuer, testAudience)
+	if err != nil {
+		t.Fatalf("ParseSession: %v", err)
+	}
+
+	if len(claims.OIDCScopes) != 0 {
+		t.Errorf("OIDCScopes: got %v, want empty", claims.OIDCScopes)
+	}
+}
+
+// --- MintIDToken email claim (lucos_aithne#299 / ADR-0003) ---
+
+func TestMintIDToken_EmailClaimPresentWhenNonEmpty(t *testing.T) {
+	k, s := newTestSigningKey(t)
+	p := newTestPrincipal(t, s, store.PrincipalClassHuman, "contact-with-email")
+
+	tokStr, err := token.MintIDToken(p, "test-client", "nonce123", []string{"openid"}, "alice@example.com", k, testIssuer, 0)
+	if err != nil {
+		t.Fatalf("MintIDToken: %v", err)
+	}
+
+	// ParseSession doesn't expose "email" directly (it's OIDC-specific, not a
+	// SessionClaims field) - decode the raw JWT payload instead.
+	payload := decodeJWTPayload(t, tokStr)
+	if !strings.Contains(payload, `"email":"alice@example.com"`) {
+		t.Errorf("id_token payload missing email claim: %s", payload)
+	}
+}
+
+func TestMintIDToken_EmailClaimOmittedWhenEmpty(t *testing.T) {
+	k, s := newTestSigningKey(t)
+	p := newTestPrincipal(t, s, store.PrincipalClassHuman, "contact-no-email")
+
+	tokStr, err := token.MintIDToken(p, "test-client", "nonce123", []string{"openid"}, "", k, testIssuer, 0)
+	if err != nil {
+		t.Fatalf("MintIDToken: %v", err)
+	}
+
+	if strings.Contains(decodeJWTPayload(t, tokStr), `"email"`) {
+		t.Errorf("id_token payload should omit email claim entirely when empty: %s", decodeJWTPayload(t, tokStr))
+	}
+}
+
+// decodeJWTPayload base64url-decodes a JWT's payload segment (without
+// signature verification) so tests can assert on raw claim presence/absence -
+// useful for claims like "email" that SessionClaims doesn't surface as a
+// dedicated field.
+func decodeJWTPayload(t *testing.T, tokStr string) string {
+	t.Helper()
+	parts := strings.Split(tokStr, ".")
+	if len(parts) != 3 {
+		t.Fatalf("malformed JWT: expected 3 segments, got %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode JWT payload: %v", err)
+	}
+	return string(payload)
 }
 
 func TestParseSession_RejectsWrongIssuer(t *testing.T) {

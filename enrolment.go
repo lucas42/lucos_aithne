@@ -65,6 +65,9 @@ func newContactsClient(origin, key string) *contactsClient {
 // contactInfo holds the data fetched from lucos_contacts for a contact.
 type contactInfo struct {
 	DisplayName string
+	// PrimaryEmail is the person's ADR-0003 primary email address, or "" if
+	// they have none set. Source of the OIDC email claim (lucos_aithne#299).
+	PrimaryEmail string
 }
 
 // Get fetches contact info from lucos_contacts.
@@ -94,8 +97,10 @@ func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
 		return nil, fmt.Errorf("contacts: unexpected status %d for contact %q", resp.StatusCode, contactID)
 	}
 
-	// Parse the response JSON. We only care about the display name.
-	// The contacts API returns an object; we fish out the name field.
+	// Parse the response JSON — we care about the display name and the
+	// ADR-0003 primary email. The contacts API returns an object; primary_email
+	// is absent/null when the person has no primary email set, so the type
+	// assertion below correctly yields "" in that case (lucos_aithne#299).
 	var payload map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("contacts: decode response: %w", err)
@@ -106,7 +111,8 @@ func (c *contactsClient) Get(contactID string) (*contactInfo, error) {
 		// Fall back to the contact ID if no name is available.
 		name = contactID
 	}
-	return &contactInfo{DisplayName: name}, nil
+	primaryEmail, _ := payload["primary_email"].(string)
+	return &contactInfo{DisplayName: name, PrimaryEmail: primaryEmail}, nil
 }
 
 // contactListItem is a single entry in the contact list returned by List.
