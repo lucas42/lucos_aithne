@@ -256,12 +256,39 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	// (see oidcDiscovery.TokenEndpointAuthMethodsSupported). Some OIDC relying
 	// parties (e.g. BookStack, used by lucos_worlds) always send credentials
 	// via Basic Auth regardless of what the discovery document advertises.
-	// Additive and backward-compatible: existing client_secret_post callers
-	// send no Authorization header, so r.BasicAuth() returns ok=false and
-	// clientID/clientSecret are untouched.
+	// This is a genuine aithne conformance gap, not a posture choice: RFC 6749
+	// §2.3.1 makes client_secret_basic the mandatory baseline method — aithne
+	// only supported the optional client_secret_post one (lucas42/lucos_aithne#295,
+	// lucos-architect review).
 	if basicID, basicSecret, ok := r.BasicAuth(); ok {
-		clientID = basicID
-		clientSecret = basicSecret
+		// RFC 6749 §2.3: a client MUST NOT use more than one authentication
+		// method in a single request. Reject outright rather than silently
+		// preferring one source — a request presenting both is malformed,
+		// not a client we should guess at.
+		if clientID != "" || clientSecret != "" {
+			writeTokenError(w, http.StatusBadRequest, "invalid_request",
+				"client credentials must be sent via either HTTP Basic Auth or the request body, not both")
+			return
+		}
+
+		// RFC 6749 §2.3.1: the client_id and client_secret in the Basic Auth
+		// header are each individually application/x-www-form-urlencoded
+		// before being concatenated and base64-encoded. Go's r.BasicAuth()
+		// only reverses the base64 step, so undo the URL-encoding too — both
+		// values come from the same header together, never split across
+		// sources.
+		decodedID, err := url.QueryUnescape(basicID)
+		if err != nil {
+			writeTokenError(w, http.StatusBadRequest, "invalid_request", "malformed client_id in Authorization header")
+			return
+		}
+		decodedSecret, err := url.QueryUnescape(basicSecret)
+		if err != nil {
+			writeTokenError(w, http.StatusBadRequest, "invalid_request", "malformed client_secret in Authorization header")
+			return
+		}
+		clientID = decodedID
+		clientSecret = decodedSecret
 	}
 
 	if code == "" || clientID == "" || clientSecret == "" || redirectURI == "" {

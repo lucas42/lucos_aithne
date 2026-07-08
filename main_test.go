@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3592,6 +3593,90 @@ func TestOAuth2Token_AuthCodeGrant_BasicAuthWrongSecret(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+// TestOAuth2Token_AuthCodeGrant_BasicAuthBothMethodsRejected verifies that a
+// request presenting client credentials via BOTH HTTP Basic Auth and the
+// form body is rejected outright (RFC 6749 §2.3: a client MUST NOT use more
+// than one authentication method per request) — not silently preferring one
+// source over the other (lucos-architect review, lucas42/lucos_aithne#295).
+func TestOAuth2Token_AuthCodeGrant_BasicAuthBothMethodsRejected(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-bothmethods", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-bothmethods", "https://rp.test/cb", "erin", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&client_id=rp-bothmethods&client_secret=" + url.QueryEscape(rawSecret) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("rp-bothmethods", rawSecret)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp["error"] != "invalid_request" {
+		t.Errorf("error: got %v, want invalid_request", resp["error"])
+	}
+}
+
+// TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding verifies that client
+// credentials sent via HTTP Basic Auth are URL-decoded per RFC 6749 §2.3.1
+// (the client_id/client_secret are each application/x-www-form-urlencoded
+// before being combined and base64-encoded) — Go's r.BasicAuth() only
+// reverses the base64 step, not the URL-encoding (lucos-architect review,
+// lucas42/lucos_aithne#295). Uses a client_id/secret containing characters
+// that require encoding ("+", " ", "/") so the test would fail if decoding
+// were skipped, not just pass trivially on plain alphanumerics.
+func TestOAuth2Token_AuthCodeGrant_BasicAuthURLDecoding(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawClientID := "rp client+id"
+	rawSecret := "secret+with/chars"
+	secretHash := hashOIDCSecret(rawSecret)
+	if _, err := s.CreateOIDCClient(rawClientID, secretHash, "Test Client", []string{"https://rp.test/cb"}); err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	code := issueAuthCode(t, s, mux, rawClientID, "https://rp.test/cb", "frank", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Build the Authorization header manually with URL-encoded components —
+	// req.SetBasicAuth doesn't URL-encode its inputs, so a real spec-compliant
+	// client would encode before calling the equivalent of SetBasicAuth.
+	encoded := url.QueryEscape(rawClientID) + ":" + url.QueryEscape(rawSecret)
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(encoded)))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
 	}
 }
 
