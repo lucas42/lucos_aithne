@@ -3643,9 +3643,9 @@ func TestOAuth2Token_AuthCodeGrant_BasicAuthBothMethodsRejected(t *testing.T) {
 // but league/oauth2-client's HttpBasicAuthOptionProvider — which BookStack
 // (lucos_worlds) hardcodes — does `base64_encode(sprintf('%s:%s', id,
 // secret))` with no urlencode step, despite its own docblock citing this RFC
-// section (verified directly against the vendored library). An earlier
-// version of this fix added url.QueryUnescape() and was reverted before merge
-// (lucos-architect review, lucas42/lucos_aithne#296) — it would have silently
+// section (verified directly against the vendored library). #296 merged and
+// deployed with a url.QueryUnescape() call added on an earlier review
+// suggestion; lucos-architect caught afterwards that it would have silently
 // mangled a real client_secret containing '+' (decoded to space) or '%' (a
 // decode error). This test uses such a secret specifically so it would fail
 // if URL-decoding were ever reintroduced.

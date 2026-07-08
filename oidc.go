@@ -281,9 +281,9 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 		// section. So URL-decoding here would be actively wrong for our actual
 		// client: any client_secret containing '+' or '%' would be silently
 		// mangled ('+' -> space, or a decode error on '%'), a latent regression
-		// waiting for a future secret rotation to trigger (lucos-architect
-		// review, lucas42/lucos_aithne#296 — caught and reverted before merge).
-		// Use the raw r.BasicAuth() values as-is.
+		// waiting for a future secret rotation to trigger. #296 merged and
+		// deployed with this bug before lucos-architect's review caught it;
+		// this is the fix-forward (#297). Use the raw r.BasicAuth() values as-is.
 		clientID = basicID
 		clientSecret = basicSecret
 	}
