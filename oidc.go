@@ -271,24 +271,21 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 			return
 		}
 
-		// RFC 6749 §2.3.1: the client_id and client_secret in the Basic Auth
-		// header are each individually application/x-www-form-urlencoded
-		// before being concatenated and base64-encoded. Go's r.BasicAuth()
-		// only reverses the base64 step, so undo the URL-encoding too — both
-		// values come from the same header together, never split across
-		// sources.
-		decodedID, err := url.QueryUnescape(basicID)
-		if err != nil {
-			writeTokenError(w, http.StatusBadRequest, "invalid_request", "malformed client_id in Authorization header")
-			return
-		}
-		decodedSecret, err := url.QueryUnescape(basicSecret)
-		if err != nil {
-			writeTokenError(w, http.StatusBadRequest, "invalid_request", "malformed client_secret in Authorization header")
-			return
-		}
-		clientID = decodedID
-		clientSecret = decodedSecret
+		// RFC 6749 §2.3.1 technically specifies the client_id/client_secret in
+		// the Basic Auth header should each be application/x-www-form-urlencoded
+		// before being combined and base64-encoded — but real clients don't
+		// reliably follow this. Verified directly against the library BookStack
+		// (lucos_worlds) uses: league/oauth2-client's HttpBasicAuthOptionProvider
+		// does `base64_encode(sprintf('%s:%s', $client_id, $client_secret))` —
+		// raw, no urlencode step, despite its own docblock citing this RFC
+		// section. So URL-decoding here would be actively wrong for our actual
+		// client: any client_secret containing '+' or '%' would be silently
+		// mangled ('+' -> space, or a decode error on '%'), a latent regression
+		// waiting for a future secret rotation to trigger (lucos-architect
+		// review, lucas42/lucos_aithne#296 — caught and reverted before merge).
+		// Use the raw r.BasicAuth() values as-is.
+		clientID = basicID
+		clientSecret = basicSecret
 	}
 
 	if code == "" || clientID == "" || clientSecret == "" || redirectURI == "" {
