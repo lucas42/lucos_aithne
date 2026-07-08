@@ -83,7 +83,7 @@ func handleOpenIDConfiguration(issuer string) http.HandlerFunc {
 		GrantTypesSupported:               []string{"authorization_code", "client_credentials"},
 		SubjectTypesSupported:             []string{"public"},
 		IDTokenSigningAlgValuesSupported:  []string{"ES256"},
-		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_post", "client_secret_basic"},
 		ClaimsSupported:                   []string{"iss", "sub", "aud", "exp", "iat", "jti", "nonce", "principal_class", "name", "scopes"},
 	}
 	b, _ := json.Marshal(doc) // static; marshal once at construction
@@ -252,12 +252,13 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 
 	// Accept client credentials via HTTP Basic Auth ("client_secret_basic",
 	// RFC 6749 §2.3.1) in addition to the form-body method above
-	// ("client_secret_post", the only method this server's discovery document
-	// currently advertises). Some OIDC relying parties (e.g. BookStack, used by
-	// lucos_worlds) always send credentials via Basic Auth regardless of what
-	// the discovery document advertises. Additive and backward-compatible:
-	// existing client_secret_post callers send no Authorization header, so
-	// r.BasicAuth() returns ok=false and clientID/clientSecret are untouched.
+	// ("client_secret_post") — the discovery document now advertises both
+	// (see oidcDiscovery.TokenEndpointAuthMethodsSupported). Some OIDC relying
+	// parties (e.g. BookStack, used by lucos_worlds) always send credentials
+	// via Basic Auth regardless of what the discovery document advertises.
+	// Additive and backward-compatible: existing client_secret_post callers
+	// send no Authorization header, so r.BasicAuth() returns ok=false and
+	// clientID/clientSecret are untouched.
 	if basicID, basicSecret, ok := r.BasicAuth(); ok {
 		clientID = basicID
 		clientSecret = basicSecret

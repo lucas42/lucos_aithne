@@ -3164,6 +3164,42 @@ func TestOpenIDConfiguration_BasicFields(t *testing.T) {
 	}
 }
 
+// TestOpenIDConfiguration_AdvertisesBothTokenEndpointAuthMethods verifies the
+// discovery document's metadata matches actual server behaviour after
+// lucas42/lucos_aithne#295: both client_secret_post (the original, form-body
+// method) and client_secret_basic (added to support BookStack/lucos_worlds,
+// which always sends credentials via HTTP Basic Auth) are advertised.
+func TestOpenIDConfiguration_AdvertisesBothTokenEndpointAuthMethods(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	rr := httptest.NewRecorder()
+	newOIDCMux(s).ServeHTTP(rr, req)
+
+	var doc struct {
+		TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode discovery doc: %v", err)
+	}
+
+	want := map[string]bool{"client_secret_post": false, "client_secret_basic": false}
+	for _, method := range doc.TokenEndpointAuthMethodsSupported {
+		if _, ok := want[method]; ok {
+			want[method] = true
+		}
+	}
+	for method, found := range want {
+		if !found {
+			t.Errorf("token_endpoint_auth_methods_supported missing %q — got %v", method, doc.TokenEndpointAuthMethodsSupported)
+		}
+	}
+}
+
 func TestOpenIDConfiguration_MethodNotAllowed(t *testing.T) {
 	s, err := store.Open(":memory:", testMainKEK)
 	if err != nil {
