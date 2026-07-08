@@ -250,6 +250,19 @@ func handleAuthCodeGrant(s *store.Store, issuer, environment string, tokenLimite
 	clientSecret := r.FormValue("client_secret")
 	redirectURI := r.FormValue("redirect_uri")
 
+	// Accept client credentials via HTTP Basic Auth ("client_secret_basic",
+	// RFC 6749 §2.3.1) in addition to the form-body method above
+	// ("client_secret_post", the only method this server's discovery document
+	// currently advertises). Some OIDC relying parties (e.g. BookStack, used by
+	// lucos_worlds) always send credentials via Basic Auth regardless of what
+	// the discovery document advertises. Additive and backward-compatible:
+	// existing client_secret_post callers send no Authorization header, so
+	// r.BasicAuth() returns ok=false and clientID/clientSecret are untouched.
+	if basicID, basicSecret, ok := r.BasicAuth(); ok {
+		clientID = basicID
+		clientSecret = basicSecret
+	}
+
 	if code == "" || clientID == "" || clientSecret == "" || redirectURI == "" {
 		writeTokenError(w, http.StatusBadRequest, "invalid_request",
 			"code, client_id, client_secret, and redirect_uri are required")

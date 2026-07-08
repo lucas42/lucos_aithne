@@ -3485,6 +3485,80 @@ func TestOAuth2Token_AuthCodeGrant_Success(t *testing.T) {
 	}
 }
 
+// TestOAuth2Token_AuthCodeGrant_BasicAuthCredentials verifies that a relying
+// party may send client credentials via HTTP Basic Auth ("client_secret_basic",
+// RFC 6749 §2.3.1) instead of as form-body parameters ("client_secret_post").
+// Some OIDC clients (e.g. BookStack, used by lucos_worlds) always send
+// credentials this way, regardless of what this server's discovery document
+// advertises (lucas42/lucos_worlds#26).
+func TestOAuth2Token_AuthCodeGrant_BasicAuthCredentials(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	rawSecret := createTestOIDCClient(t, s, "rp-basicauth", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-basicauth", "https://rp.test/cb", "alice", "state1", "nonce1")
+
+	// Note: no client_id/client_secret in the form body — only via Basic Auth.
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("rp-basicauth", rawSecret)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if resp["access_token"] == "" {
+		t.Error("access_token must not be empty")
+	}
+	if resp["id_token"] == "" {
+		t.Error("id_token must not be empty")
+	}
+}
+
+// TestOAuth2Token_AuthCodeGrant_BasicAuthWrongSecret verifies that a wrong
+// client secret sent via HTTP Basic Auth is rejected exactly like a wrong
+// secret sent via form body (TestOAuth2Token_AuthCodeGrant_WrongClientSecret).
+func TestOAuth2Token_AuthCodeGrant_BasicAuthWrongSecret(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	mux := newOIDCMux(s)
+	createTestOIDCClient(t, s, "rp-basicauth-wrongsecret", []string{"https://rp.test/cb"})
+	code := issueAuthCode(t, s, mux, "rp-basicauth-wrongsecret", "https://rp.test/cb", "dave", "s", "n")
+
+	body := strings.NewReader("grant_type=authorization_code&code=" + url.QueryEscape(code) +
+		"&redirect_uri=" + url.QueryEscape("https://rp.test/cb"))
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("rp-basicauth-wrongsecret", "wrong-secret")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
 // TestOAuth2Token_AuthCodeGrant_ScopeNarrowing verifies that the access token
 // only carries the subset of the principal's granted scopes that the client
 // actually requested at /oauth2/authorize (lucos_aithne#258) — not the
