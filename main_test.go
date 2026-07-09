@@ -255,7 +255,7 @@ var testMainKEK = [32]byte{
 
 // testVocab is a minimal vocabulary for main package tests.
 var testMainVocab = func() *store.Vocabulary {
-	v, err := parseScopesYAML([]byte("scopes:\n  - aithne:admin\n  - render-ui\n"))
+	v, err := parseScopesYAML([]byte("scopes:\n  - aithne:admin\n  - aithne:read\n  - render-ui\n"))
 	if err != nil {
 		panic(fmt.Sprintf("testMainVocab: %v", err))
 	}
@@ -286,6 +286,7 @@ func newAdminMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	contacts := newContactsClient("http://contacts.test", "test-key")
 	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, testIssuer, checkGrant(s), "aithne:admin", "aithne:read"))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
@@ -973,6 +974,205 @@ func TestAdminGrantByID_Revoke_NotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+// --- Admin grants/check tests (lucos_aithne#302) ---
+
+func TestAdminGrantsCheck_TrueWhenGranted(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-1")
+	if _, err := s.CreateGrant(target.ID, "render-ui", "development", "granter", testMainVocab); err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["granted"] != true {
+		t.Errorf("granted: got %v, want true", resp["granted"])
+	}
+	// The whole point of shape B: nothing beyond the yes/no leaks.
+	if _, present := resp["granted_by"]; present {
+		t.Errorf("checkGrant must not leak granted_by, got %v", resp["granted_by"])
+	}
+	if len(resp) != 1 {
+		t.Errorf("checkGrant response should have exactly one field, got %v", resp)
+	}
+}
+
+func TestAdminGrantsCheck_FalseWhenNotGranted(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-2")
+	// No grant created for this principal at all.
+
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["granted"] != false {
+		t.Errorf("granted: got %v, want false", resp["granted"])
+	}
+}
+
+func TestAdminGrantsCheck_FalseWhenRevoked(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-3")
+	grant, err := s.CreateGrant(target.ID, "render-ui", "development", "granter", testMainVocab)
+	if err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+	if err := s.RevokeGrant(grant.ID, "revoker"); err != nil {
+		t.Fatalf("revoke grant: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["granted"] != false {
+		t.Errorf("a revoked grant must not count as granted: got %v", resp["granted"])
+	}
+}
+
+func TestAdminGrantsCheck_AcceptsReadScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-4")
+
+	// aithne:read only — no aithne:admin. Must still be let through, since
+	// this is the whole point of the lesser scope (lucos_aithne#302).
+	tok := mintBearerToken(t, s, []string{"aithne:read"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("aithne:read must be sufficient for /admin/grants/check: expected 200, got %d\n%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAdminGrantsCheck_RejectsNeitherScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-5")
+
+	// Neither aithne:admin nor aithne:read.
+	tok := mintBearerToken(t, s, []string{"render-ui"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestAdminGrantsCheck_MissingPrincipalID(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?scope=render-ui", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAdminGrantsCheck_MissingScope(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-6")
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	newAdminMux(s).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
 	}
 }
 
