@@ -203,10 +203,15 @@ you treat the incident's forgery window as closed.
 **Serve-stale consumers to check** — every consumer implementing the serve-last-known-good
 contract. As of this writing:
 
-| Consumer | What it gates | Verify order |
+Names below are the **container names** (`container_name:` in each service's
+`docker-compose.yml`), not the repo names — several repos ship the JWKS-verifying
+service as a distinct container.
+
+| Container | What it gates | Verify order |
 |---|---|---|
-| `lucos_creds` | `creds:admin` — access to **every** stored secret | **First** |
-| `lucos_arachne` | knowledge-graph `/mcp` + `/explore` | |
+| `lucos_creds_ui` | `creds:admin` — access to **every** stored secret. (NB: the bare `lucos_creds` container is the Go backend and is **not** a JWKS consumer — restarting it does nothing.) | **First** |
+| `lucos_arachne_mcp` | knowledge-graph `/mcp` | |
+| `lucos_arachne_explore` | knowledge-graph `/explore` | |
 | `lucos_media_seinn` | media playback session | |
 | `lucos_loganne` | event stream | |
 | `lucos_notes` | notes | |
@@ -214,14 +219,20 @@ contract. As of this writing:
 > Treat this list as "every consumer that implements the contract's serve-last-known-good
 > section" — if a new consumer has adopted it since this runbook was written, include it.
 
-**Once ≥30 min have elapsed since the rotation in Step 1** (so aithne is no longer serving
-the old key in its JWKS), force each consumer to re-fetch — the simplest always-safe action
-is to redeploy/restart it:
+**Wait ~35 min after the rotation in Step 1** (the 30-min `VerificationWindow` plus a few
+minutes' safety margin — a restart even slightly early re-fetches the still-served old key
+and is a silent no-op, per the timing note below), so aithne is no longer serving the old
+key in its JWKS. Then force each consumer to re-fetch — the simplest always-safe action is
+to redeploy/restart it:
 
 ```sh
 # For each serve-stale consumer, on its host — creds first:
-docker restart lucos_creds
-# …then arachne, seinn, loganne, notes.
+docker restart lucos_creds_ui        # NOT lucos_creds (that's the Go backend)
+docker restart lucos_arachne_mcp
+docker restart lucos_arachne_explore
+docker restart lucos_media_seinn
+docker restart lucos_loganne
+docker restart lucos_notes
 ```
 
 **Timing matters.** A restart *during* the 30-min window re-fetches a JWKS that still
