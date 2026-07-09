@@ -1068,7 +1068,12 @@ func listGrants(s *store.Store) http.HandlerFunc {
 // it's gated to accept the lesser aithne:read scope (as well as
 // aithne:admin), so it must not leak more than the specific yes/no asked
 // about (lucos_aithne#302).
-func checkGrant(s *store.Store) http.HandlerFunc {
+//
+// Rate-limited per calling principal and audit-logged on every completed
+// query (lucos_aithne#305): principal_id and scope are both practically
+// enumerable, so this is a tripwire for the day aithne:read is granted more
+// broadly than the coordinator principal it was built for.
+func checkGrant(s *store.Store, limiter *keyedLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principalID := r.URL.Query().Get("principal_id")
 		scope := r.URL.Query().Get("scope")
@@ -1078,6 +1083,22 @@ func checkGrant(s *store.Store) http.HandlerFunc {
 		}
 		if scope == "" {
 			http.Error(w, "400 Bad Request — scope is required", http.StatusBadRequest)
+			return
+		}
+
+		// Attribution is read from the verified JWT claims injected by
+		// requireAnyScope — never from a client-supplied field.
+		claims, ok := r.Context().Value(claimsContextKey).(*token.SessionClaims)
+		if !ok {
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		if ok, count := limiter.Allow(claims.Subject); !ok {
+			reqLogger(r).Printf("rate limit exceeded: %s principal=%q count=%d window=%s", r.URL.Path, claims.Subject, count, grantsCheckWindow)
+			retryAfter := fmt.Sprintf("%d", int(grantsCheckWindow.Seconds()))
+			w.Header().Set("Retry-After", retryAfter)
+			http.Error(w, "429 Too Many Requests — too many grants/check calls, retry after "+retryAfter+" seconds", http.StatusTooManyRequests)
 			return
 		}
 
@@ -1099,6 +1120,12 @@ func checkGrant(s *store.Store) http.HandlerFunc {
 				break
 			}
 		}
+
+		// Audit log (lucos_aithne#305): a query against this narrow-scope
+		// endpoint is logged on every call, not just failures, so a spike in
+		// distinct principal_id/scope pairs queried by one caller is
+		// observable at the point aithne:read is granted more broadly.
+		reqLogger(r).Printf("grants/check queried by %s: principal_id=%s scope=%s granted=%t", claims.Subject, principalID, scope, granted)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"granted": granted})
@@ -1722,6 +1749,7 @@ func main() {
 	// Rate limiters for authentication endpoints.
 	tokenLimiter := newKeyedLimiter(tokenEndpointLimit, tokenEndpointWindow)
 	ceremonyLimiter := newKeyedLimiter(ceremonyBeginLimit, ceremonyBeginWindow)
+	grantsCheckLimiter := newKeyedLimiter(grantsCheckLimit, grantsCheckWindow)
 
 	// Background goroutine: sweep expired ceremony sessions on a timer.
 	// This bounds memory independently of request volume — previously only the
@@ -1741,6 +1769,7 @@ func main() {
 		for range ticker.C {
 			tokenLimiter.sweepExpired()
 			ceremonyLimiter.sweepExpired()
+			grantsCheckLimiter.sweepExpired()
 		}
 	}()
 
@@ -1795,7 +1824,7 @@ func main() {
 	mux.HandleFunc("/admin/grants", handleGrants(s, vocab, issuer, environment, contacts))
 	// Exact match, so it's chosen over the /admin/grants/ subtree route below
 	// (lucos_aithne#302 — narrow boolean grant-check, read-scope-gated).
-	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, issuer, checkGrant(s), "aithne:admin", "aithne:read"))
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, issuer, checkGrant(s, grantsCheckLimiter), "aithne:admin", "aithne:read"))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, issuer, handleAdminContacts(contacts)))

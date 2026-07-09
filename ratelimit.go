@@ -6,6 +6,7 @@ package main
 //   - POST /oauth2/token  by client_id  (tokenEndpointLimit   req/window)
 //   - POST /auth/login/begin by IP      (ceremonyBeginLimit   req/window)
 //   - POST /enrol/begin        by IP    (same ceremonyLimiter instance)
+//   - GET  /admin/grants/check by calling principal (grantsCheckLimit req/window)
 //
 // Design choices (per lucos-security comment on #160):
 //   - Fixed-window (not sliding-window or token-bucket). The precision difference
@@ -39,6 +40,18 @@ const (
 	// A human performs at most one ceremony at a time; 10/min is generous.
 	ceremonyBeginLimit  = 10
 	ceremonyBeginWindow = time.Minute
+
+	// grantsCheckLimit: max /admin/grants/check calls per calling principal per
+	// minute. principal_id and scope are both practically enumerable, and this
+	// route accepts the narrow aithne:read scope, so it's rate-limited to raise
+	// the cost of walking the full grants table one boolean at a time
+	// (lucos_aithne#305). Keyed on the calling principal (from the verified
+	// token's sub), not IP — this is an authenticated admin route, so principal
+	// identity is the meaningful dimension. 60/min matches tokenEndpointLimit's
+	// precedent: a wide margin for legitimate bulk-verification workflows,
+	// still blocks naive automation.
+	grantsCheckLimit  = 60
+	grantsCheckWindow = time.Minute
 
 	// rateLimiterCleanupInterval: how often stale key entries are evicted from the
 	// limiter maps. Chosen to be much longer than the window so entries get a chance
