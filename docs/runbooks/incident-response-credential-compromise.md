@@ -133,6 +133,21 @@ However, the old key remains in the JWKS verification endpoint for **30 minutes*
 `VerificationWindow`), so any tokens already forged with the compromised key remain
 verifiable for up to ≤35 minutes. Nothing can be done about those within that window.
 
+> **⚠ The ≤35-min bound assumes every consumer can refetch the JWKS.** It is the
+> `VerificationWindow` (30 min) plus the consumer JWKS cache TTL (5 min) — and that
+> second term only holds if the consumer actually completes a fresh JWKS fetch after the
+> window elapses. Consumers that implement **serve-last-known-good** resilience (per
+> [local-verification-contract.md](../local-verification-contract.md) §"Serve
+> last-known-good on a failed refresh") deliberately keep verifying against their
+> **last-known-good key set** whenever a JWKS refresh fails — and a post-rotation forgery
+> reuses the *old* `kid` the consumer already holds, so nothing forces that consumer to
+> refresh. A serve-stale consumer that cannot reach the JWKS endpoint (a DNS/network
+> partition specific to that one consumer — **not** necessarily a full aithne outage) will
+> therefore keep accepting old-key forgeries **for as long as the reachability problem
+> persists — unbounded, not ≤35 min.** Step 3 below closes this. The consumer that gates
+> the highest-value scope (`lucos_creds`, which gates `creds:admin`) is the one to verify
+> first.
+
 ### Step 2 — Re-key the SIGNING_KEK
 
 The SIGNING_KEK is the AES-256-GCM key that wraps the EC signing private keys stored in
@@ -177,11 +192,69 @@ under the new KEK.
 > raw-bytes scheme is handled by a separate `--migrate-kek` subcommand. For the full
 > procedure covering both subcommands, see `docs/runbooks/rotate-or-migrate-signing-kek.md`.
 
-### Step 3 — Audit for forged tokens
+### Step 3 — Force serve-stale consumers to drop the compromised key
 
-After the JWKS cache TTL has elapsed (~35 minutes), all old-key tokens are expired.
-Review logs for any unusual activity from the ≤35-minute window — unexpected scopes,
-access patterns inconsistent with the identified agent slugs, etc.
+The ≤35-min bound (Step 1) only holds for a consumer that completes a fresh JWKS fetch
+after the 30-min `VerificationWindow` elapses. A **serve-stale** consumer that cannot
+reach the JWKS endpoint keeps verifying old-key forgeries indefinitely (see the warning
+under Step 1). You must confirm each serve-stale consumer has dropped the old key before
+you treat the incident's forgery window as closed.
+
+**Serve-stale consumers to check** — every consumer implementing the serve-last-known-good
+contract. As of this writing:
+
+Names below are the **container names** (`container_name:` in each service's
+`docker-compose.yml`), not the repo names — several repos ship the JWKS-verifying
+service as a distinct container.
+
+| Container | What it gates | Verify order |
+|---|---|---|
+| `lucos_creds_ui` | `creds:admin` — access to **every** stored secret. (NB: the bare `lucos_creds` container is the Go backend and is **not** a JWKS consumer — restarting it does nothing.) | **First** |
+| `lucos_arachne_mcp` | knowledge-graph `/mcp` | |
+| `lucos_arachne_explore` | knowledge-graph `/explore` | |
+| `lucos_media_seinn` | media playback session | |
+| `lucos_loganne` | event stream | |
+| `lucos_notes` | notes | |
+
+> Treat this list as "every consumer that implements the contract's serve-last-known-good
+> section" — if a new consumer has adopted it since this runbook was written, include it.
+
+**Wait ~35 min after the rotation in Step 1** (the 30-min `VerificationWindow` plus a few
+minutes' safety margin — a restart even slightly early re-fetches the still-served old key
+and is a silent no-op, per the timing note below), so aithne is no longer serving the old
+key in its JWKS. Then force each consumer to re-fetch — the simplest always-safe action is
+to redeploy/restart it:
+
+```sh
+# For each serve-stale consumer, on its host — creds first:
+docker restart lucos_creds_ui        # NOT lucos_creds (that's the Go backend)
+docker restart lucos_arachne_mcp
+docker restart lucos_arachne_explore
+docker restart lucos_media_seinn
+docker restart lucos_loganne
+docker restart lucos_notes
+```
+
+**Timing matters.** A restart *during* the 30-min window re-fetches a JWKS that still
+contains the old key, so it does **not** close the window — wait until the window has
+elapsed, or restart again afterwards. A healthy consumer that comes back up **after** the
+window has fetched a JWKS containing only the new key, and will reject old-key forgeries
+from that point.
+
+**If a consumer genuinely cannot reach the JWKS endpoint**, a cold-start restart leaves it
+with an empty key cache, so it **fails closed and rejects all tokens** (forgeries included)
+until reachability is restored — safe against the forgery, at the cost of that consumer's
+availability. Either way, no consumer is left indefinitely trusting the compromised key.
+Confirm each consumer is healthy in `lucos_monitoring` after restarting.
+
+### Step 4 — Audit for forged tokens
+
+After the JWKS cache TTL has elapsed (~35 minutes) **and Step 3 is complete for every
+serve-stale consumer**, all old-key tokens are rejected everywhere. Review logs for any
+unusual activity from the exposure window — unexpected scopes, access patterns
+inconsistent with the identified agent slugs, etc. For any serve-stale consumer that was
+unreachable during the incident, extend the audit window to cover the full period it was
+unable to refresh.
 
 ---
 
@@ -266,7 +339,7 @@ Once the incident is contained and the user has a new/secure device:
 | **Revoke IdP sessions** | — | — | **✅ Do first (step 1a)** |
 | Revoke scope grants | ✅ Do first | Partial | Optional |
 | `POST /admin/rotate-signing-key` | ❌ Do NOT | ✅ Do first | ❌ Do NOT |
-| Effective window before full lockout | ≤20 min | ≤35 min | ≤20 min |
+| Effective window before full lockout | ≤20 min | ≤35 min for reachable consumers; **unbounded for a serve-stale consumer that can't refresh** until Step 3 forces it | ≤20 min |
 | New tokens minted after remediation | Immediately blocked | Immediately blocked | Immediately blocked |
 
 The two-layer model after ADR-0003: for human principals, revoking the passkey credential
@@ -285,3 +358,5 @@ compromise response.**
 - lucas42/lucos_aithne#162 — the issue that identified this runbook gap.
 - lucas42/lucos_aithne#151 — the issue that introduced the `--rekey` subcommand.
 - lucas42/lucos_aithne#181 — the issue that added the IdP session + re-mint endpoint.
+- lucas42/lucos_aithne#306 — the issue that added Scenario B Step 3 (serve-stale
+  consumers exceeding the ≤35-min bound).
