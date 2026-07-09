@@ -534,7 +534,10 @@ func handleUserinfo(s *store.Store, issuer string, contacts *contactsClient) htt
 		if claims.PrincipalClass == store.PrincipalClassHuman && contacts != nil {
 			info, err := contacts.Get(claims.Subject)
 			if err == nil {
-				if info.DisplayName != "" {
+				// name is gated on the "profile" OIDC scope having been
+				// requested at /oauth2/authorize, mirroring the email gating
+				// below (lucos_aithne#301).
+				if slices.Contains(claims.OIDCScopes, "profile") && info.DisplayName != "" {
 					resp["name"] = info.DisplayName
 				}
 				// email is gated on the "email" OIDC scope having been
