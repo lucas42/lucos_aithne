@@ -4405,6 +4405,86 @@ func TestUserinfo_EmailClaim_AbsentWhenNoPrimaryEmail(t *testing.T) {
 	}
 }
 
+// --- Userinfo name claim tests (lucos_aithne#301) ---
+//
+// Mirrors the email claim tests above: name is gated on the "profile" OIDC
+// scope having been requested, the same way email is gated on "email".
+
+func TestUserinfo_NameClaim_PresentWhenProfileScopeRequestedAndDisplayNameSet(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Alice","primary_email":"alice@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-name-present", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-name-present", "https://rp.test/cb", "alice", "s", "n", "openid profile")
+	accessToken := exchangeCodeForTokens(t, mux, "rp-name-present", rawSecret, "https://rp.test/cb", code)["access_token"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if resp["name"] != "Alice" {
+		t.Errorf("userinfo name: got %v, want Alice", resp["name"])
+	}
+}
+
+func TestUserinfo_NameClaim_AbsentWhenProfileScopeNotRequested(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	// Contacts has a display name on file, but the client never requested
+	// the "profile" scope — it must not be leaked.
+	contactsSrv := httptest.NewServer(newContactsServer(t, http.StatusOK, `{"name":"Bob","primary_email":"bob@example.com"}`))
+	defer contactsSrv.Close()
+	contacts := newContactsClient(contactsSrv.URL, "test-key")
+
+	mux := newOIDCMuxWithContacts(s, contacts)
+	rawSecret := createTestOIDCClient(t, s, "rp-name-not-requested", []string{"https://rp.test/cb"})
+	code := issueAuthCodeWithScope(t, s, mux, "rp-name-not-requested", "https://rp.test/cb", "bob", "s", "n", "openid")
+	accessToken := exchangeCodeForTokens(t, mux, "rp-name-not-requested", rawSecret, "https://rp.test/cb", code)["access_token"].(string)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode userinfo: %v", err)
+	}
+	if _, present := resp["name"]; present {
+		t.Errorf("userinfo must omit name when the profile scope wasn't requested, got %v", resp["name"])
+	}
+}
+
+// Note: unlike email (which has no fallback when primary_email is absent),
+// contacts.Get falls back to the contact ID itself when "name" is missing
+// from the response (see enrolment.go) — so DisplayName is never actually
+// empty for a successful lookup. There's no "absent display name" case to
+// mirror from the email tests; the `info.DisplayName != ""` guard in
+// handleUserinfo is retained only for parity with the pre-existing code.
+
 // exchangeCodeForTokens POSTs to /oauth2/token with the authorization_code
 // grant and returns the decoded JSON response (access_token, id_token, etc).
 func exchangeCodeForTokens(t *testing.T, mux *http.ServeMux, clientID, clientSecret, redirectURI, code string) map[string]any {
