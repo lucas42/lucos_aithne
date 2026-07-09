@@ -736,12 +736,21 @@ func grantToJSON(g *store.Grant) grantJSON {
 }
 
 // requireAdminScope wraps an HTTP handler, requiring a valid session JWT with
-// the aithne:admin scope. The token must be passed as:
+// the aithne:admin scope. It is a thin wrapper over requireAnyScope kept for
+// the (many) existing call sites that only ever need admin.
+func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
+	return requireAnyScope(s, issuer, next, "aithne:admin")
+}
+
+// requireAnyScope wraps an HTTP handler, requiring a valid session JWT
+// carrying at least one of allowedScopes. The token must be passed as:
 //
 //	Authorization: Bearer <token>
 //
-// Returns 401 if no valid token is present and 403 if the scope is missing.
-func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) http.HandlerFunc {
+// Returns 401 if no valid token is present and 403 if none of allowedScopes
+// is present (lucos_aithne#302 — generalised from the admin-only check so a
+// lesser read scope can be accepted alongside aithne:admin on some routes).
+func requireAnyScope(s *store.Store, issuer string, next http.HandlerFunc, allowedScopes ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Extract Bearer token from Authorization header.
 		authHeader := r.Header.Get("Authorization")
@@ -754,13 +763,13 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 		// Build verification key set from current signing keys.
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
-			reqLogger(r).Printf("requireAdminScope: list verification keys: %v", err)
+			reqLogger(r).Printf("requireAnyScope: list verification keys: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
-			reqLogger(r).Printf("requireAdminScope: build key set: %v", err)
+			reqLogger(r).Printf("requireAnyScope: build key set: %v", err)
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -771,16 +780,19 @@ func requireAdminScope(s *store.Store, issuer string, next http.HandlerFunc) htt
 			return
 		}
 
-		// Verify aithne:admin scope.
-		hasAdmin := false
+		// Verify at least one of allowedScopes is present.
+		hasScope := false
+	scopeCheck:
 		for _, sc := range claims.Scopes {
-			if sc == "aithne:admin" {
-				hasAdmin = true
-				break
+			for _, allowed := range allowedScopes {
+				if sc == allowed {
+					hasScope = true
+					break scopeCheck
+				}
 			}
 		}
-		if !hasAdmin {
-			http.Error(w, "403 Forbidden — aithne:admin scope required", http.StatusForbidden)
+		if !hasScope {
+			http.Error(w, fmt.Sprintf("403 Forbidden — one of %v required", allowedScopes), http.StatusForbidden)
 			return
 		}
 
@@ -1046,6 +1058,50 @@ func listGrants(s *store.Store) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// checkGrant handles GET /admin/grants/check?principal_id=X&scope=Y.
+//
+// Returns only {"granted": true|false} — never the requester's other scopes,
+// granted_by, or timestamps. This is deliberately narrower than listGrants:
+// it's gated to accept the lesser aithne:read scope (as well as
+// aithne:admin), so it must not leak more than the specific yes/no asked
+// about (lucos_aithne#302).
+func checkGrant(s *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principalID := r.URL.Query().Get("principal_id")
+		scope := r.URL.Query().Get("scope")
+		if principalID == "" {
+			http.Error(w, "400 Bad Request — principal_id is required", http.StatusBadRequest)
+			return
+		}
+		if scope == "" {
+			http.Error(w, "400 Bad Request — scope is required", http.StatusBadRequest)
+			return
+		}
+
+		// No environment filter — each aithne instance only ever holds its
+		// own environment's grants, so this instance's active grants for the
+		// principal are exactly what "granted here" means (lucos_aithne#302:
+		// ships to every environment, not gated dev-first).
+		grants, err := s.ListGrants(principalID, "", true)
+		if err != nil {
+			reqLogger(r).Printf("checkGrant: %v", err)
+			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		granted := false
+		for _, g := range grants {
+			if g.Scope == scope {
+				granted = true
+				break
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"granted": granted})
 	}
 }
 
@@ -1734,8 +1790,12 @@ func main() {
 	mux.HandleFunc("/oauth2/token", handleOAuth2Token(s, issuer, environment, tokenLimiter, contacts))
 	mux.HandleFunc("/oauth2/userinfo", handleUserinfo(s, issuer, contacts))
 
-	// Admin enrolment surface (all gated on aithne:admin scope).
+	// Admin enrolment surface (all gated on aithne:admin scope, except
+	// /admin/grants/check below which also accepts the lesser aithne:read).
 	mux.HandleFunc("/admin/grants", handleGrants(s, vocab, issuer, environment, contacts))
+	// Exact match, so it's chosen over the /admin/grants/ subtree route below
+	// (lucos_aithne#302 — narrow boolean grant-check, read-scope-gated).
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, issuer, checkGrant(s), "aithne:admin", "aithne:read"))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, issuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScopeFromCookie(s, issuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, issuer, handleAdminContacts(contacts)))
