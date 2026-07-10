@@ -45,7 +45,9 @@ type errorPageData struct {
 //     changes nothing — only the administrator can fix it.
 const (
 	retryTransient = "Try again in a moment."
-	retryUnlikely  = "Retrying won't help — contact the administrator if this continues."
+	// No "if this continues" — a config error isn't transient or a matter of
+	// degree, it's broken now (lucos-ux review on #309).
+	retryUnlikely = "Retrying won't help. Contact the administrator for help."
 )
 
 // renderErrorPage serves a friendly, styled HTML error page in place of a raw

@@ -165,7 +165,7 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 		if !client.HasRedirectURI(redirectURIStr) {
 			renderErrorPage(w, http.StatusBadRequest,
 				"App configuration mismatch",
-				"This app's sign-in address isn't recognised by lucOS.",
+				"This app is registered with lucOS, but tried to send you back to an address lucOS doesn't recognise for it.",
 				retryUnlikely)
 			return
 		}
