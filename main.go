@@ -1575,7 +1575,10 @@ func handleLoginPage(tmplFS fs.FS) http.HandlerFunc {
 		nonce, err := applyPageCSP(w)
 		if err != nil {
 			reqLogger(r).Printf("handleLoginPage: generate nonce: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			renderErrorPage(w, http.StatusInternalServerError,
+				"Something went wrong",
+				"We couldn't load the sign-in page just then.",
+				retryTransient)
 			return
 		}
 		if err := tmpl.Execute(w, loginPageData{Nonce: nonce}); err != nil {

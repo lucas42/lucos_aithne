@@ -116,31 +116,57 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 		state := q.Get("state")
 		nonce := q.Get("nonce")
 
+		// serverError renders the generic "something went wrong, try again"
+		// page for the internal (non-config) failures below — none of these
+		// are the user's fault or fixable by them, and a retry may genuinely
+		// succeed a moment later.
+		serverError := func() {
+			renderErrorPage(w, http.StatusInternalServerError,
+				"Something went wrong",
+				"We couldn't complete your sign-in just then.",
+				retryTransient)
+		}
+
 		// --- Phase 1: validate client_id and redirect_uri ---
 		// These errors are NOT forwarded to the redirect_uri (prevents open redirect).
+		// They're also not the user's fault or fixable by them — they mean the app
+		// that sent them here is missing or misconfigured, so the copy points at the
+		// administrator rather than suggesting the user do something differently.
 
 		if clientID == "" {
-			http.Error(w, "400 Bad Request — client_id is required", http.StatusBadRequest)
+			renderErrorPage(w, http.StatusBadRequest,
+				"Sign-in link incomplete",
+				"This sign-in link is missing information it needs to continue.",
+				retryUnlikely)
 			return
 		}
 
 		client, err := s.GetOIDCClient(clientID)
 		if errors.Is(err, store.ErrNotFound) {
-			http.Error(w, "400 Bad Request — unknown client_id", http.StatusBadRequest)
+			renderErrorPage(w, http.StatusBadRequest,
+				"App not recognised",
+				"This app isn't registered to sign in with lucOS.",
+				retryUnlikely)
 			return
 		}
 		if err != nil {
 			reqLogger(r).Printf("handleAuthorize: get client %q: %v", clientID, err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 
 		if redirectURIStr == "" {
-			http.Error(w, "400 Bad Request — redirect_uri is required", http.StatusBadRequest)
+			renderErrorPage(w, http.StatusBadRequest,
+				"Sign-in link incomplete",
+				"This sign-in link is missing information it needs to continue.",
+				retryUnlikely)
 			return
 		}
 		if !client.HasRedirectURI(redirectURIStr) {
-			http.Error(w, "400 Bad Request — redirect_uri not registered for this client", http.StatusBadRequest)
+			renderErrorPage(w, http.StatusBadRequest,
+				"App configuration mismatch",
+				"This app is registered with lucOS, but tried to send you back to an address lucOS doesn't recognise for it.",
+				retryUnlikely)
 			return
 		}
 
@@ -185,13 +211,13 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 		keys, err := s.ListVerificationKeys(token.VerificationWindow)
 		if err != nil {
 			reqLogger(r).Printf("handleAuthorize: list verification keys: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 		keySet, err := token.BuildVerificationKeySet(keys)
 		if err != nil {
 			reqLogger(r).Printf("handleAuthorize: build key set: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 
@@ -215,21 +241,21 @@ func handleAuthorize(s *store.Store, issuer, environment string) http.HandlerFun
 		}
 		if err != nil {
 			reqLogger(r).Printf("handleAuthorize: get principal: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 
 		rawCode, err := store.GenerateRawCode()
 		if err != nil {
 			reqLogger(r).Printf("handleAuthorize: generate code: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 
 		expiresAt := time.Now().Add(authCodeTTL)
 		if err := s.CreateOIDCAuthCode(rawCode, clientID, principal.ID, redirectURIStr, scopeStr, nonce, expiresAt); err != nil {
 			reqLogger(r).Printf("handleAuthorize: create auth code: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			serverError()
 			return
 		}
 

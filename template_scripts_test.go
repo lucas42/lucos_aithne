@@ -159,6 +159,18 @@ func TestTemplateScriptsSyntax(t *testing.T) {
 			tmpl: "templates/access_denied.html",
 			data: accessDeniedPageData{Nonce: nonce},
 		},
+		{
+			// Deliberately has no inline (or external) scripts at all — see
+			// error_page.go's doc comment — so this case is a render-without-
+			// panicking smoke test rather than a script-syntax check.
+			name: "error.html",
+			tmpl: "templates/error.html",
+			data: errorPageData{
+				Title:         "Something went wrong",
+				Message:       "We couldn't complete your sign-in just then.",
+				RetryGuidance: retryTransient,
+			},
+		},
 	}
 
 	for _, tt := range tests {

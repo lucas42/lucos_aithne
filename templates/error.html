@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — lucOS</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/aithne.css">
+</head>
+<body>
+  <div class="card card--center">
+    <h2>{{.Title}}</h2>
+    <p>{{.Message}}</p>
+    {{if .RetryGuidance}}<p>{{.RetryGuidance}}</p>{{end}}
+    <a href="/">← Home</a>
+  </div>
+</body>
+</html>
