@@ -420,16 +420,16 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			return
 		}
 
-		rawToken := r.URL.Query().Get("token")
-		if rawToken == "" {
-			http.Error(w, "400 Bad Request — invite token is required", http.StatusBadRequest)
-			return
-		}
-
 		nonce, err := applyPageCSP(w)
 		if err != nil {
+			// No nonce means we can't render enrol_error.html either (its
+			// script tag requires one) — fall back to the nonce-free generic
+			// error page.
 			reqLogger(r).Printf("handleEnrolPage: generate nonce: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			renderErrorPage(w, http.StatusInternalServerError,
+				"Something went wrong",
+				"We couldn't open this invite just then.",
+				retryTransient)
 			return
 		}
 
@@ -437,6 +437,15 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 			if err := errorTmpl.Execute(w, enrolErrorPageData{Reason: reason, Nonce: nonce}); err != nil {
 				reqLogger(r).Printf("handleEnrolPage: render error (%s): %v", reason, err)
 			}
+		}
+
+		rawToken := r.URL.Query().Get("token")
+		if rawToken == "" {
+			// Same copy as an unrecognised token (below) — from the user's
+			// perspective "no token" and "a token that doesn't match anything"
+			// are the same situation: this link isn't a valid invite.
+			renderError("not_found")
+			return
 		}
 
 		inv, err := s.GetInviteByRawToken(rawToken)
@@ -454,7 +463,10 @@ func handleEnrolPage(s *store.Store, contacts *contactsClient) http.HandlerFunc 
 		}
 		if err != nil {
 			reqLogger(r).Printf("enrol: get invite: %v", err)
-			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+			renderErrorPage(w, http.StatusInternalServerError,
+				"Something went wrong",
+				"We couldn't open this invite just then.",
+				retryTransient)
 			return
 		}
 

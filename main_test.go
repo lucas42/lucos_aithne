@@ -1708,8 +1708,16 @@ func TestEnrolPage_MissingToken(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handleEnrolPage(s, contacts)(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing token, got %d", rr.Code)
+	// A missing token gets the same friendly "not valid" error page as an
+	// unrecognised one (lucas42/lucos_aithne#309) — 200 with error HTML, not
+	// a raw 400 text response. From the user's perspective both situations
+	// are "this link isn't a valid invite".
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 with error HTML for missing token, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "not valid") {
+		t.Errorf("error page should mention invite not valid, got: %s", body)
 	}
 }
 
@@ -3528,6 +3536,14 @@ func TestAuthorize_MissingClientID(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
 	}
+	// Friendly HTML per lucas42/lucos_aithne#309, not a raw "400 Bad Request" text response.
+	body := rr.Body.String()
+	if strings.Contains(body, "400 Bad Request") {
+		t.Errorf("expected friendly error copy, got raw error text: %s", body)
+	}
+	if !strings.Contains(body, "Sign-in link incomplete") {
+		t.Errorf("expected friendly error copy, got: %s", body)
+	}
 }
 
 func TestAuthorize_UnknownClientID(t *testing.T) {
@@ -3545,6 +3561,14 @@ func TestAuthorize_UnknownClientID(t *testing.T) {
 	newOIDCMux(s).ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
+	}
+	// Friendly HTML per lucas42/lucos_aithne#309, not a raw "400 Bad Request" text response.
+	body := rr.Body.String()
+	if strings.Contains(body, "400 Bad Request") {
+		t.Errorf("expected friendly error copy, got raw error text: %s", body)
+	}
+	if !strings.Contains(body, "App not recognised") {
+		t.Errorf("expected friendly error copy, got: %s", body)
 	}
 }
 
@@ -3564,6 +3588,14 @@ func TestAuthorize_UnregisteredRedirectURI(t *testing.T) {
 	newOIDCMux(s).ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 (not a redirect), got %d", rr.Code)
+	}
+	// Friendly HTML per lucas42/lucos_aithne#309, not a raw "400 Bad Request" text response.
+	body := rr.Body.String()
+	if strings.Contains(body, "400 Bad Request") {
+		t.Errorf("expected friendly error copy, got raw error text: %s", body)
+	}
+	if !strings.Contains(body, "App configuration mismatch") {
+		t.Errorf("expected friendly error copy, got: %s", body)
 	}
 }
 
