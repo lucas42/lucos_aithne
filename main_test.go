@@ -286,7 +286,7 @@ func newAdminMux(s *store.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	contacts := newContactsClient("http://contacts.test", "test-key")
 	mux.HandleFunc("/admin/grants", handleGrants(s, testMainVocab, testIssuer, "development", contacts))
-	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, testIssuer, checkGrant(s), "aithne:admin", "aithne:read"))
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, testIssuer, checkGrant(s, noopLimiter()), "aithne:admin", "aithne:read"))
 	mux.HandleFunc("/admin/grants/", requireAdminScope(s, testIssuer, handleGrantByID(s)))
 	mux.HandleFunc("/admin/enrol", requireAdminScope(s, testIssuer, handleAdminEnrolPage()))
 	mux.HandleFunc("/admin/contacts", requireAdminScope(s, testIssuer, handleAdminContacts(contacts)))
@@ -1173,6 +1173,90 @@ func TestAdminGrantsCheck_MissingScope(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestAdminGrantsCheck_RateLimitedPerCallingPrincipal(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-7")
+
+	// A small explicit limit (rather than the real grantsCheckLimit) so the
+	// test doesn't need 61 requests to exercise the 429 path.
+	limiter := newKeyedLimiter(2, time.Minute)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, testIssuer, checkGrant(s, limiter), "aithne:admin", "aithne:read"))
+
+	// One token reused across requests — the limiter is keyed on the calling
+	// principal (claims.Subject), so a fresh token per request (a different
+	// principal each time, per mintBearerToken) would never trip the limit.
+	tok := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	doRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	for i := 1; i <= 2; i++ {
+		rr := doRequest()
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200 within the limit, got %d\n%s", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := doRequest()
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("request 3: expected 429 once the limit is exceeded, got %d\n%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Error("429 response must include a Retry-After header")
+	}
+}
+
+func TestAdminGrantsCheck_RateLimitIsPerPrincipalNotShared(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetOrCreateActiveSigningKey(); err != nil {
+		t.Fatalf("signing key: %v", err)
+	}
+
+	target, _ := s.CreatePrincipal(store.PrincipalClassHuman, "check-target-8")
+
+	limiter := newKeyedLimiter(1, time.Minute)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/grants/check", requireAnyScope(s, testIssuer, checkGrant(s, limiter), "aithne:admin", "aithne:read"))
+
+	doRequest := func(tok string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/grants/check?principal_id="+target.ID+"&scope=render-ui", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	tokA := mintBearerToken(t, s, []string{"aithne:admin"})
+	tokB := mintBearerToken(t, s, []string{"aithne:admin"})
+
+	if rr := doRequest(tokA); rr.Code != http.StatusOK {
+		t.Fatalf("principal A's first request: expected 200, got %d", rr.Code)
+	}
+	// Principal A is now at the limit (1/min), but principal B has made no
+	// requests yet — the limit must be per-principal, not global.
+	if rr := doRequest(tokB); rr.Code != http.StatusOK {
+		t.Fatalf("principal B's first request must not be blocked by principal A's usage, got %d", rr.Code)
 	}
 }
 
