@@ -15,6 +15,26 @@ It complements — and does not duplicate — the two reference documents:
 
 ---
 
+## Choosing an integration pattern
+
+The bulk migration below moves the estate's **lucos-authored** consumers, which all integrate the same way: they verify the aithne JWT in their own code. That in-app pattern is the estate mainstream and the subject of the rest of this guide. But it is not the only way a system sits behind aithne — an adopted third-party app you don't author can't have verification bolted into code you don't control. Before following the migration mechanics, confirm which of the three **recommended** patterns fits your system.
+
+| Pattern | You use it when | How | Worked example |
+|---|---|---|---|
+| **1. In-app verification** | You author the service (you control its code), **and it's served from a `*.l42.eu` domain** (see the requirement note below). | The app verifies the aithne JWT itself. Node services use the **`lucos_aithne_jsclient`** library; other languages implement [local-verification-contract.md](local-verification-contract.md) directly. This is **the rest of this guide.** | `lucas42/lucos_arachne` (`explore/src/server/auth.js`) |
+| **2. Configure the app's native OIDC** | It's an adopted third-party app that **ships its own OIDC/OAuth2 login** meeting aithne's requirements (see the ES256 note below). | Point the app's existing OIDC config at aithne (issuer, client id/secret, JWKS). Fewest moving parts, and the app keeps owning its own session. **Preferred for adopted apps that have a login of their own.** | — |
+| **3. oauth2-proxy sidecar** | It's an adopted third-party app with **no usable login of its own** — it just needs to be gated. | Front it with an oauth2-proxy container + nginx `auth_request`, gating on the required scope. | `lucas42/lucos_locations` (fronting the third-party `owntracks/recorder`) |
+
+**Decision, briefly:** you author it *and* it's on `*.l42.eu` → **(1) in-app**. It's adopted and has its own OIDC login → **(2) configure native OIDC**. It's adopted with no login of its own → **(3) sidecar**.
+
+**Pattern 1 requires a `*.l42.eu` domain.** In-app verification reads the shared **`aithne_session`** cookie, which aithne sets in production with `Domain=l42.eu` — so the browser only sends it to `l42.eu` and its subdomains. A consumer served from any other domain never receives the cookie and cannot use this pattern (the canonical `lucas42/lucos_arachne` middleware reads `aithne_session` straight off the request; aithne's cookie domain is set in `token/token.go`). Patterns 2 and 3 are **not** bound by this: each runs a standard OAuth2/OIDC redirect flow and sets its *own* session cookie (pattern 3 via oauth2-proxy's own cookie), so they work on any domain, subject only to registering the redirect URI with aithne.
+
+**Verify ES256 support before committing to pattern 2.** aithne signs ID tokens with **ES256 only** — deliberately (lucas42/lucos_locations' oauth2-proxy and others rely on it). A third-party app whose OIDC implementation only accepts RS256/HS256 cannot validate aithne's tokens as shipped, so confirm ES256 support before choosing this pattern. When a would-be pattern-2 app can't do ES256, prefer pattern 3 — the oauth2-proxy sidecar supports ES256 explicitly (`OAUTH2_PROXY_OIDC_ENABLED_SIGNING_ALGS=ES256`).
+
+**Trade-off unique to the sidecar (pattern 3).** A proxy in the request path is invisible to the app's own `/_info` — an app-level health endpoint cannot see a failure in a layer *in front of* it. This is what made the 2026-07-09 lucos_locations map-UI outage silent behind a green monitor: the oauth2-proxy sidecar crash-looped on missing prod creds while the underlying app stayed healthy and `/_info` stayed 200 (`lucas42/lucos#265`). If you choose pattern 3, budget for detecting a crash-looping sidecar at the **deploy/monitoring** layer, not via `/_info` (`lucas42/lucos#266`). Patterns 1 and 2 don't carry this blind spot — the verification lives in the same process (1) or the same third-party app (2) that `/_info` reports on.
+
+---
+
 ## Prerequisite passes (estate-wide, once)
 
 ### P1. Add every required scope to the vocabulary — first (build-time gate)
