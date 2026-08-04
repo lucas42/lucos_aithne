@@ -8,7 +8,7 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/tdewolff/parse/v2 v2.8.14
 	golang.org/x/net v0.57.0
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
