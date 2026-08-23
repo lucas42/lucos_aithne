@@ -1792,6 +1792,11 @@ func main() {
 	mux.HandleFunc("/favicon.svg", serveStaticFile(staticFS, "static/favicon.svg"))
 	mux.HandleFunc("/favicon.ico", serveStaticFile(staticFS, "static/favicon.svg"))
 
+	// robots.txt — nothing here is worth a 3rd party scraping; auth is what
+	// actually protects the site, this just tells well-behaved bots not to
+	// bother engaging with it (issue #317).
+	mux.HandleFunc("/robots.txt", serveStaticFile(staticFS, "static/robots.txt"))
+
 	// lucOS navbar web-component bundle (compiled JS, embedded at build time).
 	mux.HandleFunc("/lucos_navbar.js", serveStaticFile(staticFS, "static/lucos_navbar.js"))
 
