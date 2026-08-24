@@ -7,7 +7,7 @@ FROM lucas42/lucos_navbar:2.3.2 AS navbar
 FROM lucas42/lucos_auth_scopes:1.3.6@sha256:ced614dfeebe6406991d91a1e801d6891651a9f53be45f912b9e073d4336c4d8 AS scopes
 
 # Build stage: compile the Go binary as a static executable
-FROM golang:1.26 AS builder
+FROM golang:1.27 AS builder
 
 WORKDIR /go/src/lucos_aithne
 
