@@ -14,5 +14,13 @@
       "https://worlds.l42.eu/oidc/callback",
       "http://localhost:8040/oidc/callback"
     ]
+  },
+  {
+    "client_id": "lucos_campaigns",
+    "client_name": "lucos_campaigns (Kanka campaign manager)",
+    "redirect_uris": [
+      "https://campaigns.l42.eu/oauth2/callback",
+      "http://localhost:8041/oauth2/callback"
+    ]
   }
 ]
