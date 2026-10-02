@@ -23,7 +23,7 @@ The bulk migration below moves the estate's **lucos-authored** consumers, which 
 |---|---|---|---|
 | **1. In-app verification** | You author the service (you control its code), **and it's served from a `*.l42.eu` domain** (see the requirement note below). | The app verifies the aithne JWT itself. Node services use the **`lucos_aithne_jsclient`** library; other languages implement [local-verification-contract.md](local-verification-contract.md) directly. This is **the rest of this guide.** | `lucas42/lucos_arachne` (`explore/src/server/auth.js`) |
 | **2. Configure the app's native OIDC** | It's an adopted third-party app that **ships its own OIDC/OAuth2 login** meeting aithne's requirements (see the ES256 note below). | Point the app's existing OIDC config at aithne (issuer, client id/secret, JWKS). Fewest moving parts, and the app keeps owning its own session. **Preferred for adopted apps that have a login of their own.** | — |
-| **3. oauth2-proxy sidecar** | It's an adopted third-party app with **no usable login of its own** — it just needs to be gated. | Front it with an oauth2-proxy container + nginx `auth_request`, gating on the required scope. | `lucas42/lucos_locations` (fronting the third-party `owntracks/recorder`) |
+| **3. oauth2-proxy sidecar** | It's an adopted third-party app with **no usable login of its own** — it just needs to be gated. | Front it with an oauth2-proxy container + nginx `auth_request`, gating on the required scope. | `lucas42/lucos_locations` (fronting the third-party `owntracks/recorder`); `lucas42/lucos_campaigns` (fronting Kanka) |
 
 **Decision, briefly:** you author it *and* it's on `*.l42.eu` → **(1) in-app**. It's adopted and has its own OIDC login → **(2) configure native OIDC**. It's adopted with no login of its own → **(3) sidecar**.
 
@@ -32,6 +32,15 @@ The bulk migration below moves the estate's **lucos-authored** consumers, which 
 **Verify ES256 support before committing to pattern 2.** aithne signs ID tokens with **ES256 only** — deliberately (lucas42/lucos_locations' oauth2-proxy and others rely on it). A third-party app whose OIDC implementation only accepts RS256/HS256 cannot validate aithne's tokens as shipped, so confirm ES256 support before choosing this pattern. When a would-be pattern-2 app can't do ES256, prefer pattern 3 — the oauth2-proxy sidecar supports ES256 explicitly (`OAUTH2_PROXY_OIDC_ENABLED_SIGNING_ALGS=ES256`).
 
 **Trade-off unique to the sidecar (pattern 3).** A proxy in the request path is invisible to the app's own `/_info` — an app-level health endpoint cannot see a failure in a layer *in front of* it. This is what made the 2026-07-09 lucos_locations map-UI outage silent behind a green monitor: the oauth2-proxy sidecar crash-looped on missing prod creds while the underlying app stayed healthy and `/_info` stayed 200 (`lucas42/lucos#265`). If you choose pattern 3, budget for detecting a crash-looping sidecar at the **deploy/monitoring** layer, not via `/_info` (`lucas42/lucos#266`). Patterns 1 and 2 don't carry this blind spot — the verification lives in the same process (1) or the same third-party app (2) that `/_info` reports on.
+
+**Second sidecar trade-off: the revocation window is `cookie_expire`, not aithne's 15 minutes.** oauth2-proxy (verified against v7.15.4, lucas42/lucos_campaigns#29) checks the ID token's expiry only when `cookie_refresh` is set. Unset, a session lasts **`cookie_expire` (default 168h) from login**, and activity doesn't extend it. So:
+
+- **Removing a scope or grant in aithne takes effect at the gate only when that session expires.** With the default cookie session store, signing out doesn't invalidate a copied cookie. The only server-side kill is rotating the consumer's `OAUTH2_PROXY_COOKIE_SECRET`, which logs everyone out.
+- **Set `OAUTH2_PROXY_COOKIE_EXPIRE` explicitly** in `docker-compose.yml`. It is your consumer's revocation window, so make it a stated decision sized to the data behind the gate, not an upstream default that can change between versions.
+- **Don't set `OAUTH2_PROXY_COOKIE_REFRESH`.** aithne issues no refresh token, so turning it on enables token-expiry checks and sessions end every 15 minutes. Put a guard comment beside the setting, because it's the obvious "fix" someone will reach for.
+- **At expiry, background XHR requests fail silently,** including an app's save calls. The gate answers with a cross-origin 302 to aithne, which the browser blocks under CORS. A full page load re-authenticates transparently while aithne's IdP session lasts, so recovery is to open the app in another tab and retry. Reloading the edit page discards unsaved input. If your app saves by XHR, document that recovery for its users.
+
+Pattern 2 has the same class of property, since the app's own session lifetime is its revocation window. Check that value when adopting.
 
 ---
 
