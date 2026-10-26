@@ -4,7 +4,7 @@ FROM lucas42/lucos_navbar:2.3.2 AS navbar
 # Vocabulary stage: canonical scope vocabulary from lucos_auth_scopes.
 # Named stage so Dependabot can track the tag + digest (COPY --from=<digest>
 # without a tag receives no Dependabot PRs — see dependabot-core #5103).
-FROM lucas42/lucos_auth_scopes:1.3.9@sha256:cb178a80dd7f4751dbcb5bda0543134dc353f76ec471b05b5d4a9465c261dee5 AS scopes
+FROM lucas42/lucos_auth_scopes:1.3.10@sha256:1f2cbf64ef8629d4fe82d56455d5a33d9ed960d864ce580118000ff972284c0a AS scopes
 
 # Build stage: compile the Go binary as a static executable
 FROM golang:1.27 AS builder
