@@ -94,6 +94,7 @@ type infoResponse struct {
 	Metrics map[string]any `json:"metrics"`
 	CI      *ciInfo        `json:"ci,omitempty"`
 	Title   string         `json:"title,omitempty"`
+	Version string         `json:"version,omitempty"`
 }
 
 type ciInfo struct {
@@ -170,6 +171,7 @@ func handleInfo(system string, s *store.Store) http.HandlerFunc {
 			Metrics: metrics,
 			CI:      &ciInfo{Circle: "gh/lucas42/lucos_aithne"},
 			Title:   "Aithne",
+			Version: os.Getenv("VERSION"),
 		}
 
 		w.Header().Set("Content-Type", "application/json")
