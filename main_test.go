@@ -91,6 +91,28 @@ func TestInfoEndpoint(t *testing.T) {
 	}
 }
 
+func TestInfoEndpointVersion(t *testing.T) {
+	s, err := store.Open(":memory:", testMainKEK)
+	if err != nil {
+		t.Fatalf("open test store: %v", err)
+	}
+	defer s.Close()
+
+	t.Run("emitted when VERSION is set", func(t *testing.T) {
+		t.Setenv("VERSION", "2.2.42")
+		if got := fetchInfo(t, s)["version"]; got != "2.2.42" {
+			t.Errorf("version: got %v, want 2.2.42", got)
+		}
+	})
+
+	t.Run("omitted when VERSION is empty", func(t *testing.T) {
+		t.Setenv("VERSION", "")
+		if v, present := fetchInfo(t, s)["version"]; present {
+			t.Errorf("version should be omitted, got %v", v)
+		}
+	})
+}
+
 // fetchInfo issues a GET /_info against the given store and returns the decoded payload.
 func fetchInfo(t *testing.T, s *store.Store) map[string]any {
 	t.Helper()
