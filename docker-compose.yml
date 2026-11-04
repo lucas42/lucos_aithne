@@ -23,6 +23,7 @@ services:
       - SIGNING_KEK
       - BOOTSTRAP_ADMIN_CONTACT_ID
       - CLIENT_KEYS
+      - VERSION
     volumes:
       - credential_store:/data
     healthcheck:
